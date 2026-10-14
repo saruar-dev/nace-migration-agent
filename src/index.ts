@@ -3,16 +3,21 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { getDetectionPatterns } from "./tools/patterns.js";
-import { getBestTemplate, getTemplates } from "./tools/templates.js";
+import { getBestTemplate } from "./tools/templates.js";
 import { generateMigrationPlanMarkdown } from "./tools/analyzer.js";
 import type { Finding, ArchitectureOverview } from "./tools/analyzer.js";
-import { writeFileSync, mkdirSync } from "fs";
-import { join, dirname } from "path";
+import { writeFileSync, mkdirSync, readFileSync } from "fs";
+import { join, dirname, isAbsolute } from "path";
 import type { OpportunityType } from "./tools/templates.js";
+import { PYTHON_EXTENSIONS, TS_JS_EXTENSIONS } from "./tools/patterns.js";
+
+const { version } = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8")
+) as { version: string };
 
 const server = new McpServer({
   name: "scaledown-migration-agent",
-  version: "0.1.0",
+  version,
 });
 
 // ── Tool 1: get_ai_detection_patterns ────────────────────────────────────────
@@ -22,7 +27,11 @@ server.tool(
   `Returns grep-compatible regex patterns for finding AI API calls in a codebase.
 Use these patterns with Grep or Bash to locate all files that call AI providers
 (OpenAI, Anthropic, LangChain, LlamaIndex, Cohere, Google GenAI, Vercel AI SDK).
-Returns patterns for both Python and TypeScript/JavaScript.`,
+Returns patterns for both Python and TypeScript/JavaScript.
+Each provider has import_patterns (decide whether a file uses the provider),
+call_patterns (locate the call lines; generic names only count when the file also
+imports the provider) and strong_call_patterns (distinctive enough to count alone).
+See usage_guide.rules.`,
   {
     language: z
       .enum(["python", "typescript", "javascript", "all"])
@@ -41,10 +50,17 @@ Returns patterns for both Python and TypeScript/JavaScript.`,
       usage_guide: {
         bash_example:
           "grep -rn --include='*.py' 'chat\\.completions\\.create' ./src",
-        note: "Use the grep_patterns array with grep -E for extended regex support.",
+        note: "All patterns are grep -E (extended regex) compatible.",
+        rules: [
+          "Only search files with the entry's `extensions`, skipping `exclude_dirs`.",
+          "A file uses a provider if any of its import_patterns match, or any of its strong_call_patterns match.",
+          "In a file that uses the provider, call_patterns give the line numbers of the calls.",
+          "A call_patterns match in a file with no matching import (e.g. `messages.create` in a Twilio file, or a project's own `generateText`) is not an AI call.",
+          "A client can be created in one file and used in another (passed in as a parameter). Phase 2 tracing must follow such clients back to where they are constructed.",
+        ],
         file_extensions: {
-          python: [".py"],
-          typescript_javascript: [".ts", ".tsx", ".js", ".mjs"],
+          python: PYTHON_EXTENSIONS,
+          typescript_javascript: TS_JS_EXTENSIONS,
         },
         exclude_dirs: [
           "node_modules",
@@ -70,7 +86,10 @@ server.tool(
   "get_integration_template",
   `Returns a concrete before/after code template showing exactly how to integrate
 ScaleDown for a specific opportunity type, AI provider, and language.
-Use this to get the exact code changes to make in a file.
+Use this to get the exact code changes to make in a file. Every template calls the
+ScaleDown HTTP API directly (no SDK). If no template exists for the exact provider,
+the closest one is returned with exact_match: false — its after_snippet still
+applies, only before_snippet shows a different provider's SDK.
 
 Opportunity types:
 - compression:     Add sd_compress before an LLM call to reduce context tokens 50-70%
@@ -91,18 +110,13 @@ Opportunity types:
       .describe("Programming language."),
   },
   async ({ opportunity_type, provider, language }) => {
-    const template = getBestTemplate(
+    const match = getBestTemplate(
       opportunity_type as OpportunityType,
       provider,
       language
     );
 
-    if (!template) {
-      // Return generic guidance when no specific template exists
-      const allForType = getTemplates({
-        opportunity_type: opportunity_type as OpportunityType,
-        language,
-      });
+    if (!match) {
       return {
         content: [
           {
@@ -110,12 +124,7 @@ Opportunity types:
             text: JSON.stringify(
               {
                 found: false,
-                message: `No exact template for ${provider}/${opportunity_type}/${language}. Closest matches:`,
-                alternatives: allForType.map((t) => ({
-                  provider: t.provider,
-                  description: t.description,
-                  after_snippet: t.after_snippet,
-                })),
+                message: `No template for ${opportunity_type}. Use the request/response shapes in the "ScaleDown HTTP API" section of scaledown-report.md, or https://docs.scaledown.ai/api-reference/.`,
               },
               null,
               2
@@ -125,6 +134,17 @@ Opportunity types:
       };
     }
 
+    const { template, exact_match } = match;
+    const notes: string[] = [];
+    if (template.provider !== provider.toLowerCase())
+      notes.push(
+        `No ${provider} template exists; before_snippet shows the ${template.provider} SDK. The after_snippet (the ScaleDown call) is the same for every provider — adapt the surrounding code to ${provider}.`
+      );
+    if (template.language !== language)
+      notes.push(
+        `No ${language} template exists; this one is ${template.language}. Port the HTTP call to ${language}.`
+      );
+
     return {
       content: [
         {
@@ -132,6 +152,10 @@ Opportunity types:
           text: JSON.stringify(
             {
               found: true,
+              exact_match,
+              matched_provider: template.provider,
+              matched_language: template.language,
+              ...(notes.length ? { match_note: notes.join(" ") } : {}),
               ...template,
             },
             null,
@@ -145,9 +169,47 @@ Opportunity types:
 
 // ── Tool 3: generate_migration_plan ──────────────────────────────────────────
 
+const OPPORTUNITY_TYPES = [
+  "compression",
+  "classification",
+  "extraction",
+  "summarization",
+] as const;
+
+// Models often use the short verb forms; accept them and store the long names.
+const SHORT_SLM_TYPES: Record<string, OpportunityType> = {
+  compress: "compression",
+  classify: "classification",
+  extract: "extraction",
+  summarize: "summarization",
+};
+
+const decompositionStepSchema = z
+  .object({
+    step: z.number(),
+    purpose: z.string(),
+    handler: z.enum(["scaledown", "llm"]),
+    slm_type: z
+      .preprocess(
+        (v) => (typeof v === "string" ? SHORT_SLM_TYPES[v] ?? v : v),
+        z.enum(OPPORTUNITY_TYPES)
+      )
+      .optional()
+      .describe('Required when handler is "scaledown".'),
+    notes: z.string(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.handler === "scaledown" && !d.slm_type)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["slm_type"],
+        message: 'slm_type is required when handler is "scaledown"',
+      });
+  });
+
 const findingSchema = z.object({
   file_path: z.string(),
-  line_number: z.number().optional(),
+  line_number: z.number().nullable().optional(),
   provider: z.string(),
   opportunities: z.array(
     z.object({
@@ -163,18 +225,10 @@ const findingSchema = z.object({
       label: z.string(),
       reasons: z.array(z.string()),
       decomposition: z
-        .array(
-          z.object({
-            step: z.number(),
-            purpose: z.string(),
-            handler: z.enum(["scaledown", "llm"]),
-            slm_type: z
-              .enum(["compression", "classification", "extraction", "summarization"])
-              .optional(),
-            notes: z.string(),
-          })
-        )
-        .optional(),
+        .array(decompositionStepSchema)
+        .nullable()
+        .optional()
+        .describe("Steps for multi-task calls (score >= 3). Omit or null for single-task calls."),
     }),
   code_snippet: z.string(),
 });
@@ -229,6 +283,20 @@ The markdown is returned as text — use save_migration_report to persist it to 
 
 // ── Tool 4: save_migration_report ─────────────────────────────────────────────
 
+/**
+ * Returns an absolute project root, or undefined if the path is relative/empty.
+ * On Windows, converts a Git Bash path (`/c/Users/...`), which Node would
+ * otherwise resolve to `C:\c\Users\...`.
+ */
+function normalizeProjectRoot(projectRoot: string): string | undefined {
+  let p = projectRoot.trim();
+  if (process.platform === "win32") {
+    const m = /^\/([a-zA-Z])(\/.*)?$/.exec(p);
+    if (m) p = `${m[1].toUpperCase()}:${(m[2] ?? "/").replace(/\//g, "\\")}`;
+  }
+  return p && isAbsolute(p) ? p : undefined;
+}
+
 server.tool(
   "save_migration_report",
   `Saves the migration report as a markdown file inside the user's project.
@@ -246,7 +314,22 @@ Returns the absolute path of the saved file.`,
       ),
   },
   async ({ markdown, project_root }: { markdown: string; project_root: string }) => {
-    const outPath = join(project_root, "scaledown-report.md");
+    const root = normalizeProjectRoot(project_root);
+    if (!root) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              saved: false,
+              error: `project_root must be an absolute path (got ${JSON.stringify(project_root)}). A relative path would resolve against the MCP server's working directory, not the project.`,
+            }),
+          },
+        ],
+      };
+    }
+    const outPath = join(root, "scaledown-report.md");
     try {
       mkdirSync(dirname(outPath), { recursive: true });
       writeFileSync(outPath, markdown, "utf8");
@@ -260,6 +343,7 @@ Returns the absolute path of the saved file.`,
       };
     } catch (err) {
       return {
+        isError: true,
         content: [
           {
             type: "text",

@@ -23,7 +23,7 @@ export interface ComplexityAnalysis {
    * When score >= 3, Claude-suggested decomposition: break the call into
    * simpler sub-calls where some can be handled by ScaleDown SLMs.
    */
-  decomposition?: DecompositionStep[];
+  decomposition?: DecompositionStep[] | null;
 }
 
 export interface DecompositionStep {
@@ -37,7 +37,7 @@ export interface DecompositionStep {
 
 export interface Finding {
   file_path: string;
-  line_number?: number;
+  line_number?: number | null;
   provider: string;
   opportunities: Opportunity[];
   complexity: ComplexityAnalysis;
@@ -172,19 +172,19 @@ const ACTIONS: Record<OpportunityType, string> = {
   classification:
     "Replace the frontier LLM call with a POST to `/classify`.",
   extraction:
-    "Replace the frontier LLM call with a POST to `/extract`.",
+    "Replace the frontier LLM call with a POST to `/v1/chat/completions` (`model: \"extract\"`).",
   summarization:
-    "Replace the frontier LLM call with a POST to `/summarization/abstractive`. **Note:** `sd_summarize` is currently in private preview — contact ScaleDown to enable.",
+    "Replace the frontier LLM call with a POST to `/v1/chat/completions` (`model: \"summarize\"`).",
   compression:
-    "Before the LLM call, POST the context to `/compress/raw/` and pass `compressed_prompt` from the response to the LLM.",
+    "Before the LLM call, POST the context to `/compress/raw/`, check `results.success`, and pass `results.compressed_prompt` (the compressed context) plus the original prompt to the LLM.",
 };
 
 function slmName(type: OpportunityType): string {
   const map: Record<OpportunityType, string> = {
     compression: "sd_compress → POST /compress/raw/",
     classification: "sd_classify → POST /classify",
-    extraction: "sd_extract → POST /extract",
-    summarization: "sd_summarize → POST /summarization/abstractive",
+    extraction: "sd_extract → POST /v1/chat/completions (model: extract)",
+    summarization: "sd_summarize → POST /v1/chat/completions (model: summarize)",
   };
   return map[type];
 }
@@ -317,7 +317,7 @@ ${f.complexity
 All ScaleDown SLMs are called via REST. No SDK required.
 
 **Base URL:** \`https://api.scaledown.xyz\`
-**Auth:** \`x-api-key: $SCALEDOWN_API_KEY\`
+**Auth:** \`x-api-key: $SCALEDOWN_API_KEY\` (\`/v1/chat/completions\` also accepts \`Authorization: Bearer $SCALEDOWN_API_KEY\`)
 **Docs:** https://docs.scaledown.ai/api-reference/
 
 ### sd_classify
@@ -332,21 +332,28 @@ x-api-key: $SCALEDOWN_API_KEY
   "labels": [
     { "name": "billing",   "rubric": "Does this describe a billing issue?" },
     { "name": "technical", "rubric": "Does this describe a technical issue?" }
-  ]
+  ],
+  "reasoning": false
 }
 \`\`\`
 
-Response: \`{ "top_label": "billing", "scores": { "billing": 0.91, "technical": 0.09 }, "labels": [...], "ocr_text": null }\`
+\`reasoning\` defaults to \`true\`, which adds a written explanation and roughly doubles the billed input tokens. Send \`false\` unless you read the \`reasoning\` field.
+
+Response: \`{ "top_label": "billing", "scores": { "billing": 0.99, "technical": 0.01 }, "labels": [...], "results": [...], "chunk_count": 1, "input_tokens": 250, "reasoning": "", "ocr_text": null }\` — read \`top_label\` (and \`scores\` for the full distribution).
 
 ### sd_extract
 
 \`\`\`http
-POST /extract
+POST /v1/chat/completions
 Content-Type: application/json
 x-api-key: $SCALEDOWN_API_KEY
 
 {
-  "text": "<input text>",
+  "model": "extract",
+  "messages": [
+    { "role": "system", "content": "<optional global instruction>" },
+    { "role": "user",   "content": "<input text>" }
+  ],
   "entities": {
     "Name":  "Full name of a person",
     "Email": "Email address"
@@ -354,7 +361,7 @@ x-api-key: $SCALEDOWN_API_KEY
 }
 \`\`\`
 
-Response: \`{ "entities": [{ "text": "Alice", "type": "Name", "confidence": 0.98, "start": 0, "end": 5 }], "structured_result": { "Name": "Alice", "Email": "..." }, "ocr_text": null }\` — read clean per-field values from \`structured_result\`.
+Response: a standard \`chat.completion\`. The result is a JSON **string** in \`choices[0].message.content\`; parse it to get \`{ "entities": [{ "text": "Alice", "type": "Name", "confidence": 0.98, "start": 0, "end": 5, "context": "..." }], "structured_result": null, "input_tokens": 229, "ocr_text": null }\`. Group \`entities[]\` by \`type\` to get per-field values (up to 30 distinct values per type). \`structured_result\` is \`null\` for flat fields like these; it is only filled for nested object or array schemas.
 
 ### sd_compress
 
@@ -370,29 +377,33 @@ x-api-key: $SCALEDOWN_API_KEY
 }
 \`\`\`
 
-Response: \`{ "compressed_prompt": "...", "successful": true, "original_prompt_tokens": 4200, "compressed_prompt_tokens": 1400 }\`
+Response: \`{ "results": { "success": true, "compressed_prompt": "...", "original_prompt": "...", "original_prompt_tokens": 4200, "compressed_prompt_tokens": 1400, "compression_ratio": 0.33 }, "successful": true, "total_original_tokens": 4200, "total_compressed_tokens": 1400, "num_successful": 1, "latency_ms": 52, "model_used": "gpt-4o" }\`
 
-### sd_summarize *(private preview)*
+The compression result is nested under \`results\` (a single object). Check \`results.success\`, then send \`results.compressed_prompt\` (the compressed **context**; the prompt is not folded in) together with your original prompt to the LLM.
+
+### sd_summarize
 
 \`\`\`http
-POST /summarization/abstractive
+POST /v1/chat/completions
 Content-Type: application/json
 x-api-key: $SCALEDOWN_API_KEY
 
 {
-  "text": "<document to summarize>",
-  "instructions": "Be concise."
+  "model": "summarize",
+  "messages": [
+    { "role": "system", "content": "Be concise." },
+    { "role": "user",   "content": "<document to summarize>" }
+  ],
+  "max_tokens": 1000
 }
 \`\`\`
 
-Response: \`{ "summary": "...", "input_chars": 4200, "output_chars": 380, "latency_ms": 120, "ocr_text": null }\`
-
-Response: \`{ "summary": "..." }\`
+Response: a standard \`chat.completion\`. Parse \`choices[0].message.content\` (a JSON string) to get \`{ "summary": "...", "input_chars": 4200, "output_chars": 380, "latency_ms": 120, "input_tokens": 1050, "finish_reason": "stop", "notice": null, "ocr_text": null }\` and read \`summary\`. \`max_tokens\` is capped at 1000; \`finish_reason: "length"\` means the summary was cut off.
 
 Get a free API key (50M tokens free) at: https://scaledown.ai/dashboard
 
 ---
-*Generated by ScaleDown Migration Agent v${report.version} at ${report.generated_at}*
+*Generated by ScaleDown Migration Agent at ${report.generated_at} · Report schema v${report.version}*
 `;
 
   return md;

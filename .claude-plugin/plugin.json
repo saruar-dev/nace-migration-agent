@@ -20,6 +20,5 @@
     "openai",
     "anthropic"
   ],
-  "category": "productivity",
-  "mcp": ".mcp.json"
+  "category": "productivity"
 }

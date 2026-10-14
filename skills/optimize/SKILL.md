@@ -186,20 +186,26 @@ Write a self-contained, re-runnable `scaledown-eval/run_eval.py`. It must:
 - Read `SCALEDOWN_API_KEY` and optional `SCALEDOWN_BASE_URL` from the environment.
 - POST each `input_text` to the endpoint **for the task type**, using the exact
   paths, request bodies, auth header, and response fields in the
-  "ScaleDown API reference" appendix below (`/extract`, `/classify`,
-  `/summarization/abstractive`, `/compress/raw/`). Use bounded `--concurrency`
-  (default 6) and a sane timeout. If in doubt, cross-check the live docs at
-  https://docs.scaledown.ai/api-reference/ or the "HTTP API reference" section of
-  `scaledown-report.md` if it exists — never assume a `/v1/` prefix or guess a
-  path.
+  "ScaleDown API reference" appendix below (`/classify`, `/compress/raw/`, and
+  `/v1/chat/completions` with `model: "extract"` or `model: "summarize"`). Use
+  bounded `--concurrency` (default 6) and a sane timeout. If in doubt,
+  cross-check the live docs at https://docs.scaledown.ai/api-reference/ or the
+  "HTTP API reference" section of `scaledown-report.md` if it exists — never
+  guess a path.
+- For classify, always send `"reasoning": false`. The harness never reads the
+  explanation, and the default (`true`) roughly doubles billed input tokens on
+  every eval call.
 - Parse the SLM output from the **correct response field** per task (see the API
   reference appendix):
-  - extract → read per-field values from `structured_result` (the clean typed
-    result), *not* the raw `entities[]` span list.
+  - extract → parse `choices[0].message.content` as JSON, then group its
+    `entities[]` by `type` to get per-field values. Read `structured_result`
+    only for nested object/array fields; it is `null` for flat fields.
   - classify → read `top_label` (and keep `scores` for margin/confusion analysis).
-  - summarize → read `summary`.
-  - compress → read `compressed_prompt` and the token counts; run the downstream
-    question against the compressed prompt to check answer survival.
+  - summarize → parse `choices[0].message.content` as JSON and read `summary`.
+  - compress → check `results.success`, then read `results.compressed_prompt`
+    and the token counts under `results` (not the top level); run the
+    downstream question against the compressed context to check answer
+    survival.
 - Normalize outputs before comparison (trim, lowercase for categorical, coerce
   numbers, treat `""/none/null` as the empty token).
 - Compute the **task-appropriate metric** from the table above:
@@ -450,59 +456,89 @@ Instantiations of the general method. Use the one matching the task type.
 
 Exact shapes the harness must use. Base URL default `https://api.scaledown.xyz`
 (override with `SCALEDOWN_BASE_URL`). Auth header is **`x-api-key`** on every
-request (not a Bearer token). `Content-Type: application/json`. **There is no
-`/v1/` prefix.** Source of truth: https://docs.scaledown.ai/api-reference/ —
-verify there if a shape looks off, as the API may evolve.
+request (`/v1/chat/completions` also accepts `Authorization: Bearer`).
+`Content-Type: application/json`. Extract and summarize go through the
+OpenAI-compatible `/v1/chat/completions`; classify and compress have their own
+paths with no `/v1/` prefix. Source of truth:
+https://docs.scaledown.ai/api-reference/ — verify there if a shape looks off, as
+the API may evolve.
 
-All four accept either `text` (raw string) or a base64 `document` +
-`document_mime_type` (JPEG/PNG/TIFF/PDF, OCR'd server-side). This skill uses
-`text`.
+All four accept text input (this skill uses text); they also accept a base64
+`document` + `document_mime_type` (JPEG/PNG/TIFF/PDF, OCR'd server-side).
 
-### extract — `POST /extract`
+### extract — `POST /v1/chat/completions`, `model: "extract"`
 The **prompt file** is the `entities` object: each key is an entity/field name,
 each value is either a string description or an object
 `{"description": "...", "threshold": 0.5, "top_n": 5}`; values may also be nested
-objects or arrays for structured entities.
+objects or arrays for structured entities. An optional global instruction goes
+in a system message.
 ```json
-Request:  {"text": "...", "entities": { "<field>": "<description>", ... },
-           "instruction": "<optional global>", "threshold": 0.0, "top_n": 0}
-Response: {"entities": [{"text","type","confidence","start","end","context"}],
-           "structured_result": { "<field>": <value | object | array> },
-           "ocr_text": <string|null>}
+Request:  {"model": "extract",
+           "messages": [{"role": "system", "content": "<optional global instruction>"},
+                        {"role": "user", "content": "<input text>"}],
+           "entities": { "<field>": "<description>", ... },
+           "threshold": 0.0, "top_n": 0}
+Response: {"choices": [{"message": {"content": "<JSON string>"}}], "usage": {...}}
+Parsed choices[0].message.content:
+          {"entities": [{"text","type","confidence","start","end","context"}],
+           "structured_result": null | { "<field>": <object | array> },
+           "input_tokens": <n>, "ocr_text": <string|null>}
 ```
-Read per-field results from **`structured_result`**, not `entities[]`.
+Per-field values come from **`entities[]` grouped by `type`** (each distinct
+value is its own entry, up to 30 per type). `structured_result` is `null` for
+flat fields and only filled when a field is a nested object or array schema.
 
 ### classify — `POST /classify`
 The **prompt file** is the `labels` array. Each label is
 `{"name": "<label>", "rubric": "<a yes/no question that defines the label>"}`.
 The rubric phrasing is what you tune.
 ```json
-Request:  {"text": "...", "labels": [{"name": "...", "rubric": "..."}, ...]}
+Request:  {"text": "...", "labels": [{"name": "...", "rubric": "..."}, ...],
+           "reasoning": false}
 Response: {"top_label": "<label>",
            "scores": {"<label>": 0.0-1.0, ...},   # sum to 1.0
            "labels": [{"label","score","rubric"}],
+           "results": [...], "chunk_count": <n>, "input_tokens": <n>,
+           "reasoning": "<empty when reasoning:false>",
            "ocr_text": <string|null>}
 ```
 Predicted class = `top_label`; use `scores` for margins and confusion analysis.
+Always send `"reasoning": false` — the default `true` bills about twice the
+input tokens for an explanation the harness doesn't use.
 
-### summarize — `POST /summarization/abstractive`
+### summarize — `POST /v1/chat/completions`, `model: "summarize"`
 ```json
-Request:  {"text": "...", "instructions": "<optional; extends default behavior>",
-           "max_tokens": 2048}
-Response: {"summary": "...", "input_chars": <n>, "output_chars": <n>,
-           "latency_ms": <n>, "ocr_text": <string|null>}
+Request:  {"model": "summarize",
+           "messages": [{"role": "system", "content": "<instructions; extends default behavior>"},
+                        {"role": "user", "content": "<input text>"}],
+           "max_tokens": 1000}
+Response: {"choices": [{"message": {"content": "<JSON string>"}}], "usage": {...}}
+Parsed choices[0].message.content:
+          {"summary": "...", "input_chars": <n>, "output_chars": <n>,
+           "latency_ms": <n>, "input_tokens": <n>,
+           "finish_reason": "stop" | "length", "notice": <string|null>,
+           "ocr_text": <string|null>}
 ```
-The tunable prompt here is `instructions` (a single string, not per-field).
+The tunable prompt here is the system-message instructions (a single string,
+not per-field). `max_tokens` is capped at 1000; `finish_reason: "length"` means
+the summary was cut off.
 
 ### compress — `POST /compress/raw/`
 Note the trailing slash. Different body shape from the others.
 ```json
 Request:  {"context": "<background/retrieved context>", "prompt": "<the question>",
            "scaledown": {"rate": "auto"}}
-Response: {"compressed_prompt": "...", "original_prompt_tokens": <n>,
-           "compressed_prompt_tokens": <n>, "successful": <bool>,
-           "latency_ms": <n>, "request_metadata": {"compression_rate": "...", ...}}
+Response: {"results": {"success": <bool>, "compressed_prompt": "...",
+                       "original_prompt": "...", "original_prompt_tokens": <n>,
+                       "compressed_prompt_tokens": <n>, "compression_ratio": <n>},
+           "successful": <bool>, "total_original_tokens": <n>,
+           "total_compressed_tokens": <n>, "num_successful": <n>,
+           "latency_ms": <n>, "model_used": "...",
+           "request_metadata": {"compression_rate": "...", ...}}
 ```
-Compression ratio = `compressed_prompt_tokens / original_prompt_tokens`. To check
-downstream survival, feed `compressed_prompt` (as context) + the sample's
-downstream question to the user's LLM and compare its answer to the expected one.
+Everything about the compression sits under **`results`** (a single object, not
+a list). Check `results.success`; the ratio is `results.compression_ratio`
+(= `compressed_prompt_tokens / original_prompt_tokens`). `results.compressed_prompt`
+is the compressed **context** only. To check downstream survival, feed it (as
+context) + the sample's downstream question to the user's LLM and compare its
+answer to the expected one.
