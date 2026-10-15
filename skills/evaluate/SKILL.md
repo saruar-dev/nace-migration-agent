@@ -75,8 +75,10 @@ The line nearest a call rarely says what it is for. Trace each one.
    variables and read where they are built, including template files, until
    you have seen the text that goes to the model.
 3. **Callers.** Grep for the enclosing function and read each caller. A shared
-   helper such as `call_llm()` with callers of different purposes is one
-   finding per distinct caller. Follow injected clients back to where they are
+   helper whose callers pass different prompts or act on the result for
+   different decisions (a generic `call_llm(prompt)`) is one finding per
+   caller; a helper that does the same job for every caller is one finding
+   (see boundary rule 5). Follow injected clients back to where they are
    constructed.
 4. **Model.** Find the model id the call uses. Resolve configuration: for
    `model=settings.openai_model`, read the settings default. Write `"unknown"`
@@ -132,10 +134,19 @@ The line nearest a call rarely says what it is for. Trace each one.
    output. The call is a site for the flag only when the flag is the main thing
    the code acts on.
 4. **One call, several jobs.** Write a decomposition (below).
-5. **Shared helpers.** One finding per distinct caller purpose.
+5. **Shared helpers.** Point each finding at the line that calls the provider
+   or library. A helper that does the whole job itself (an OCR or PDF wrapper,
+   or a model call with a fixed prompt) is one finding at that line, with its
+   callers named in the reason. Only when callers pass different prompts or act
+   on the result for different decisions is it one finding per caller, pointed
+   at the caller's line.
 6. **Dead code** (no production caller) is not reported.
 7. **Privacy steps.** If the code masks or redacts the input before the model,
    say so in the reason: NDI receives the original file.
+8. **Pipeline steps.** A call that only prepares input for another call
+   (rendering PDF pages to images for OCR or a vision model, resizing,
+   base64 encoding) is part of the site it feeds. Name it in that site's
+   reason; do not list it on its own.
 
 ### Confidence
 
