@@ -1,16 +1,19 @@
 {
-  "name": "@scaledown/migration-agent",
-  "version": "0.1.9",
-  "description": "Evaluate and migrate AI API calls in your codebase to use ScaleDown SLMs for cost reduction",
+  "name": "nace-migration-agent",
+  "version": "0.1.0",
+  "description": "Find the LLM and document-processing calls in a codebase that can move to nace's Drex (decisions) and NDI (documents), estimate the cost before and after, and migrate them",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "scaledown-agent": "dist/index.js"
+    "nace-migration-agent": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "typecheck": "tsc --noEmit",
+    "bundle": "node scripts/bundle.mjs",
+    "build": "npm run typecheck && npm run bundle",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "live-check": "tsx scripts/live-check.ts"
   },
   "files": [
     "dist/",
@@ -18,18 +21,18 @@
     ".agents/",
     ".claude-plugin/",
     ".mcp.json",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "keywords": [
-    "scaledown",
+    "nace",
+    "drex",
+    "ndi",
     "mcp",
-    "model-context-protocol",
-    "ai",
-    "llm",
-    "migration",
-    "cost-reduction",
     "claude-code",
-    "cursor"
+    "cursor",
+    "migration",
+    "cost-reduction"
   ],
   "license": "MIT",
   "dependencies": {
@@ -38,7 +41,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "esbuild": "0.28.2",
     "tsx": "^4.19.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "vitest": "4.1.11"
   }
 }
