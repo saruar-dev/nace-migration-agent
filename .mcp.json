@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "scaledown-migration-agent": {
-      "command": "npx",
-      "args": ["-y", "@scaledown/migration-agent"],
-      "env": {}
+    "nace-migration-agent": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"],
+      "env": { "NACE_NDI_USD_PER_CREDIT": "${NACE_NDI_USD_PER_CREDIT:-}" }
     }
   }
 }

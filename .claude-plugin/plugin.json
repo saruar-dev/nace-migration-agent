@@ -1,24 +1,12 @@
 {
-  "name": "slm-agent",
-  "displayName": "SLM Agent by ScaleDown",
-  "version": "0.1.9",
-  "description": "Scans your codebase for AI API calls and generates a migration plan showing exactly where and how to replace expensive LLM calls with task-specific SLMs — up to 95% cheaper — then optimizes your ScaleDown prompts against your own sample data with a reproducible eval. Supports OpenAI, Anthropic, LangChain, LlamaIndex, Cohere, Vercel AI SDK, and more. No data from your codebase is ever sent to ScaleDown servers when running this plugin.",
-  "author": {
-    "name": "ScaleDown",
-    "email": "soham@scaledown.ai"
-  },
-  "homepage": "https://scaledown.ai",
-  "repository": "https://github.com/scaledown-team/SLM_Agent",
+  "name": "nace-migrate",
+  "displayName": "nace Migration Agent",
+  "version": "0.1.0",
+  "description": "Scans your codebase for LLM and document-processing calls, shows which can move to nace's Drex (decisions) and NDI (documents) with a cost estimate, and migrates them on approval. The scan runs locally; no code is sent to nace.",
+  "author": { "name": "nace.ai", "email": "saruar@nace.ai" },
+  "homepage": "https://drex.nace.ai",
+  "repository": "https://github.com/saruar-dev/nace-migration-agent",
   "license": "MIT",
-  "keywords": [
-    "scaledown",
-    "slm",
-    "cost-reduction",
-    "ai",
-    "llm",
-    "migration",
-    "openai",
-    "anthropic"
-  ],
+  "keywords": ["nace", "drex", "ndi", "migration", "cost-reduction", "openai", "anthropic"],
   "category": "productivity"
 }

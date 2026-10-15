@@ -1,249 +1,81 @@
-# SLM Agent by ScaleDown
+# nace Migration Agent
 
-An MCP server + Claude Code plugin that scans your codebase for AI API calls and shows you exactly where and how to integrate [ScaleDown](https://scaledown.ai) SLMs to cut costs by up to 95%.
+A Claude Code plugin and MCP server that scans your codebase for LLM calls and
+document-processing calls, shows which ones can move to nace, estimates the
+cost before and after, and migrates them with your approval.
 
-> **Privacy**: This plugin analyzes your code locally. No source code or codebase data is ever sent to ScaleDown servers. The only network calls are to ScaleDown's API endpoints at runtime, when *your application* calls them with the `SCALEDOWN_API_KEY` you provide.
+- **Drex** for decisions about text: pick a label (`drex_choice`), answer yes or
+  no (`drex_noul`), rate on a scale (`drex_score`), with calibrated
+  probabilities. `drex-v2.0` is $0.06 per million input tokens; output is free.
+- **NDI** for files: parse, split, classify, extract (with citations) and
+  ground, billed in credits per page.
 
-## What it does
+> **Privacy:** the scan runs locally. The MCP server makes no network calls and
+> no code is sent to nace. Your coding agent reads the code with its own model.
+> nace is only called when your migrated code runs.
 
-1. **Evaluates** — scans your project for OpenAI, Anthropic, LangChain, LlamaIndex, Cohere, and other AI API calls
-2. **Plans** — generates a structured migration plan showing which ScaleDown SLM fits each call site:
-   - `sd_compress` — reduce context tokens 50–70% before calling your LLM (for RAG, long docs)
-   - `sd_classify` — replace frontier LLM classification calls (~95% cheaper)
-   - `sd_extract` — replace frontier LLM entity extraction calls (~95% cheaper)
-   - `sd_summarize` — replace frontier LLM summarization calls (~90% cheaper)
-3. **Migrates** — applies the changes to your code with your approval, adapting to your real variable names
-4. **Optimizes** — tunes the prompt you pass to a ScaleDown SLM against your own sample data and benchmarks it against the frontier-model output it replaced, with a reproducible eval
+## Install
 
-## Installation
+From a local clone:
 
-### Claude Code (recommended)
-
-First add the ScaleDown marketplace:
-
-```
-/plugin marketplace add scaledown-team/SLM_Agent
+```bash
+claude --plugin-dir ~/nace-migration-agent
 ```
 
-Then install the plugin:
-```
-/plugin install slm-agent@scaledown
-```
+From GitHub:
 
-Finally, reload your plugins:
 ```
+/plugin marketplace add saruar-dev/nace-migration-agent
+/plugin install nace-migrate@nace
 /reload-plugins
 ```
 
-You are now ready to use the SLM Agent. Go to any project and run:
+Then, in any project:
 
 ```
-/slm-agent:evaluate    # find & migrate AI calls to ScaleDown SLMs
-/slm-agent:optimize    # tune a ScaleDown prompt against your own data
+/nace-migrate:evaluate
 ```
 
-The plugin automatically configures the MCP server and registers the `/slm-agent:evaluate` and `/slm-agent:optimize` skills. No further setup needed.
+## The report
 
-### Cursor
+`nace-report.md` in the project root has:
 
-Add to your project's `.cursor/mcp.json` (or `~/.cursor/mcp.json` for global):
+- a summary: files scanned, sites for Drex, sites for NDI, calls that stay on the
+  LLM, and the estimated cost of 1,000 runs of each site today and with nace;
+- the architecture overview;
+- every Drex and NDI site with its location, confidence, reason and cost line;
+- the calls that stay on the LLM, and why;
+- split-up plans for calls that do several jobs;
+- the nace API reference and setup.
 
-```json
-{
-  "mcpServers": {
-    "scaledown-migration-agent": {
-      "command": "npx",
-      "args": ["-y", "@scaledown/migration-agent"]
-    }
-  }
-}
-```
-
-Then ask Cursor: *"Use the scaledown-migration-agent tools to evaluate this codebase for ScaleDown integration opportunities."*
-
-#### Using `optimize` in Cursor (Agent Skills)
-
-Cursor natively loads [Agent Skills](https://cursor.com/docs/skills) — the same `SKILL.md` format Claude Code plugins use — from `.agents/skills/`, `.cursor/skills/`, or their `~`-global equivalents. This package ships `optimize` (and `evaluate`) at `.agents/skills/`, so no MCP setup is required for `optimize` specifically:
-
-1. Install the package so its files are on disk somewhere Cursor can see, either:
-   - `npm install @scaledown/migration-agent` in your project (skills land in `node_modules/@scaledown/migration-agent/.agents/skills/` — copy or symlink that `optimize/` folder into your project's own `.agents/skills/optimize/` so Cursor's project-scoped loader picks it up), or
-   - clone [github.com/scaledown-team/SLM_Agent](https://github.com/scaledown-team/SLM_Agent) and copy `.agents/skills/optimize/` into your project's `.agents/skills/` directly.
-2. Restart Cursor (or reload the window) so it re-scans skill directories.
-3. In Cursor's Agent chat, ask it to *"optimize my ScaleDown prompt"* (or similar) — it discovers and runs the `optimize` skill, driving the same phased tuning loop (sample ingestion, error clustering, targeted iteration, final report) as `/slm-agent:optimize` does in Claude Code. It runs with whichever model you've selected in Cursor, not just Claude.
-
-The `evaluate` skill is exposed the same way, but its instructions call the `scaledown-migration-agent` MCP tools above (keep that server name so the skill's tool names resolve) for codebase scanning and report generation, so configure the MCP server too if you want to use `evaluate` in Cursor. `optimize` has no MCP dependency — it only needs shell/file access, which Cursor's agent already has.
-
-### VS Code (Copilot / any MCP-compatible extension)
-
-Add to your workspace `.vscode/mcp.json`:
-
-```json
-{
-  "servers": {
-    "scaledown-migration-agent": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@scaledown/migration-agent"]
-    }
-  }
-}
-```
-
-### Manual (any MCP client)
+Costs are estimates from token and page counts and a dated price list
+(`src/tools/pricing.ts`). A model that is not on the list is reported as "not
+estimated". NDI is shown in credits unless you set a price per credit:
 
 ```bash
-npm install -g @scaledown/migration-agent
+export NACE_NDI_USD_PER_CREDIT=0.01   # your price, from the console's Models & pricing page
 ```
 
-Then configure your MCP client to run: `scaledown-agent`
+## MCP tools
 
-## MCP Tools
-
-The server exposes four tools that any MCP-compatible AI assistant can call:
-
-| Tool | Description |
+| Tool | What it does |
 |---|---|
-| `get_ai_detection_patterns` | Returns grep-compatible regex patterns for all supported AI providers |
-| `get_integration_template` | Returns before/after code showing exactly how to integrate ScaleDown |
-| `generate_migration_plan` | Generates a full structured markdown migration plan from a list of findings |
-| `save_migration_report` | Writes the migration plan markdown to `scaledown-report.md` in the user's project root |
-
-## Migration report
-
-After evaluation, a file named **`scaledown-report.md`** is saved in your project root. It is a markdown document with a fixed section layout (report schema version `1`, shown in its header) and contains:
-
-| Section | Content |
-|---|---|
-| **Summary table** | Files scanned, files with AI calls, total opportunities, providers detected |
-| **Complexity breakdown** | Count of calls at each complexity level (trivial → highly_complex) |
-| **Per-opportunity sections** | Files, line numbers, complexity score, confidence level, and action for each of `sd_classify` / `sd_extract` / `sd_summarize` / `sd_compress` |
-| **Complex call decompositions** | For calls scoring 3+/5, a step-by-step breakdown showing which sub-tasks can move to a ScaleDown SLM and which still need a frontier LLM |
-| **HTTP API reference** | Exact request/response shapes for all four ScaleDown endpoints (`/classify`, `/compress/raw/`, and `/v1/chat/completions` for extract and summarize) |
-
-The report header looks like:
-
-```markdown
-# ScaleDown Migration Plan — my-app
-
-> Generated: 2025-05-19T10:00:00.000Z
-> Report version: 1
-
-## Summary
-| Metric | Value |
-|---|---|
-| Files scanned | 42 |
-| Files with AI API calls | 7 |
-| Total integration opportunities | 11 |
-| Providers detected | openai, langchain |
-
-### Call Complexity Breakdown
-| Complexity | Count |
-|---|---|
-| simple | 4 |
-| moderate | 2 |
-| complex | 1 |
-```
-
-## Prompt optimization (`/slm-agent:optimize`)
-
-Migrating a call to `sd_extract` / `sd_classify` / `sd_summarize` / `sd_compress`
-is step one. Step two is making the SLM's output match — or beat — the frontier
-model it replaced, on **your** data. The `optimize` skill runs that loop. It is
-general: it adapts the eval metric to your task type (Macro-F1 + confusion matrix
-for classification, per-field precision/recall for extraction, ROUGE/faithfulness
-for summarization, ratio + downstream correctness for compression) and to your own
-success criterion.
-
-1. **Collects** your ScaleDown API key (read from the environment, never written
-   to disk) and a small set of labeled samples.
-2. **Creates samples if you have none** — it finds representative inputs in your
-   project, agrees a field/label schema with you, and records a baseline answer
-   per sample (from your original model call, or your confirmed ground truth),
-   then validates the set.
-3. **Runs a reproducible eval** (`scaledown-eval/run_eval.py`) with a metric that
-   fits the task — one that can't be gamed by a degenerate strategy (e.g. Macro-F1
-   so a rare class can't be ignored; a per-field real-vs-empty split so a field
-   can't look accurate just by returning empty).
-4. **Iterates the prompt** one scoped change at a time, always re-running the
-   current best in the same batch and **twice**, so it can separate a real
-   improvement from API run-to-run noise, and always scores the whole task so a
-   win on one class/field that quietly regresses another is caught.
-
-Everything it produces lives under `scaledown-eval/` — the samples, each prompt
-version, per-round metrics, and an `optimization-report.md` with the winning
-prompt and the exact command to reproduce it. Your sample data is only ever sent
-to the ScaleDown endpoint you provide a key for.
-
-```
-export SCALEDOWN_API_KEY=...
-/slm-agent:optimize
-```
-
-## Supported providers
-
-| Provider | Language |
-|---|---|
-| OpenAI (v0 and v1; Chat Completions and Responses APIs) | Python, TypeScript/JS |
-| Anthropic | Python, TypeScript/JS |
-| LangChain | Python, TypeScript/JS |
-| LlamaIndex | Python |
-| Cohere | Python |
-| Google Gen AI (`google-genai`) and legacy Generative AI (`google-generativeai`) | Python |
-| Vercel AI SDK | TypeScript/JS |
-
-Files scanned: `.py` for Python; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs` for TypeScript/JS.
-
-A file counts as using a provider when it imports that provider's SDK, or makes a call distinctive enough to identify it on its own (e.g. `chat.completions.create` on a client passed in from elsewhere). Generic names such as `messages.create` or `generateText` only count in files that import the SDK, so Twilio calls or a project's own `generateText()` aren't reported.
-
-## Example output
-
-```
-## ScaleDown Migration Plan — my-app
-
-| Metric | Value |
-|---|---|
-| Files with AI API calls | 7 |
-| Total integration opportunities | 11 |
-| Providers detected | openai, langchain |
-
-## 1. Replace Classification Calls with `sd_classify`
-Estimated savings: ~95% per call
-
-| File | Line |
-|---|---|
-| `src/triage.py` | 42 |
-| `src/router.py` | 88 |
-
-## 2. Add Context Compression with `sd_compress`
-Estimated savings: 50-70% on context tokens
-
-| File | Line |
-|---|---|
-| `src/rag_pipeline.py` | 117 |
-| `src/chat.py` | 55 |
-```
+| `get_ai_detection_patterns` | grep patterns for LLM providers, raw HTTP LLM calls and document pipelines |
+| `get_integration_template` | before/after code with `nace-sdk` for each of the eight types |
+| `generate_migration_plan` | builds the report and does the cost arithmetic |
+| `save_migration_report` | writes `nace-report.md` to the project root |
 
 ## Development
 
 ```bash
-git clone https://github.com/scaledown-team/SLM_Agent
-cd SLM_Agent
 npm install
-npm run build       # compile TypeScript → dist/
-npm run dev         # run without compiling (via tsx)
+npm test             # unit and server tests
+npm run typecheck
+npm run bundle       # rebuilds dist/index.js; commit it with any src change
+NACE_API_KEY=nace_sk_... npm run live-check   # runs every after_snippet against the live API
 ```
 
-## Get a ScaleDown API key
+## Credits
 
-Sign up at [scaledown.ai/dashboard](https://scaledown.ai/dashboard) — **50 million free tokens** included.
-
-## Extending to other IDEs
-
-- **Codex (OpenAI)**: Add to `~/.codex/config.toml`:
-  ```toml
-  [mcp_servers.scaledown-migration-agent]
-  command = "npx"
-  args = ["-y", "@scaledown/migration-agent"]
-  ```
-- **JetBrains**: Use any MCP proxy plugin and point it at `npx @scaledown/migration-agent`
-- **Neovim / Emacs**: Use any MCP client plugin with the same npx command
+Forked from [scaledown-team/SLM_Agent](https://github.com/scaledown-team/SLM_Agent)
+(MIT). See `LICENSE`.

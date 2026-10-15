@@ -1,45 +1,23 @@
 {
   "$schema": "https://code.claude.com/schemas/marketplace.json",
-  "name": "scaledown",
-  "displayName": "ScaleDown",
-  "description": "Official ScaleDown plugins for Claude Code. Reduce AI API costs by up to 95% using task-specific SLMs for classification, extraction, summarization, and context compression.",
-  "owner": {
-    "name": "ScaleDown",
-    "email": "soham@scaledown.ai"
-  },
-  "homepage": "https://scaledown.ai",
+  "name": "nace",
+  "displayName": "nace",
+  "description": "nace plugins for Claude Code: move LLM and document-processing calls to Drex and NDI.",
+  "owner": { "name": "nace.ai", "email": "saruar@nace.ai" },
+  "homepage": "https://drex.nace.ai",
   "plugins": [
     {
-      "name": "slm-agent",
-      "displayName": "SLM Agent",
-      "source": {
-        "source": "url",
-        "url": "https://github.com/scaledown-team/SLM_Agent.git",
-        "ref": "main"
-      },
-      "skills": [
-        "./skills/evaluate",
-        "./skills/optimize"
-      ],
-      "description": "Scans your codebase for AI API calls and generates a migration plan showing exactly where and how to replace expensive LLM calls with task-specific SLMs — up to 95% cheaper, then optimizes your ScaleDown prompts against your own data. No data from your codebase is ever sent to ScaleDown servers.",
-      "version": "0.1.9",
-      "author": {
-        "name": "ScaleDown",
-        "email": "soham@scaledown.ai"
-      },
-      "homepage": "https://scaledown.ai",
-      "repository": "https://github.com/scaledown-team/SLM_Agent",
+      "name": "nace-migrate",
+      "displayName": "nace Migration Agent",
+      "source": { "source": "url", "url": "https://github.com/saruar-dev/nace-migration-agent.git", "ref": "nace" },
+      "skills": ["./skills/evaluate"],
+      "description": "Finds the LLM and document-processing calls that can move to Drex and NDI, estimates the cost before and after, and migrates them on approval.",
+      "version": "0.1.0",
+      "author": { "name": "nace.ai", "email": "saruar@nace.ai" },
+      "homepage": "https://drex.nace.ai",
+      "repository": "https://github.com/saruar-dev/nace-migration-agent",
       "license": "MIT",
-      "keywords": [
-        "scaledown",
-        "slm",
-        "cost-reduction",
-        "ai",
-        "llm",
-        "migration",
-        "openai",
-        "anthropic"
-      ],
+      "keywords": ["nace", "drex", "ndi", "migration", "cost-reduction"],
       "category": "productivity"
     }
   ]
