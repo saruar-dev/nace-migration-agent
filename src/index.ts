@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, join } from "path";
 import { z } from "zod";
-import { resolveNdiPrice } from "./config.js";
+import { resolveNdiPrices } from "./config.js";
 import { architectureOverviewSchema, findingSchema, naceTypeSchema } from "./schema.js";
 import { generateMigrationPlanMarkdown } from "./tools/analyzer.js";
 import { LLM_FILE_INPUT_PATTERNS, PYTHON_EXTENSIONS, TS_JS_EXTENSIONS, getDetectionPatterns } from "./tools/patterns.js";
@@ -97,16 +97,26 @@ server.tool(
   `Builds the nace-report.md markdown from the findings: summary with estimated cost before and
 after, architecture overview, Drex sites, NDI sites, calls that stay on the LLM, split-up calls,
 API reference and setup. Cost arithmetic happens here, from each finding's cost block and the
-built-in price list. NDI dollars need ndi_usd_per_credit or the NACE_NDI_USD_PER_CREDIT environment
-variable; otherwise NDI is shown in credits. Call save_migration_report next.`,
+built-in price list. Each NDI tool has its own price: NDI dollars need ndi_prices or the
+NACE_NDI_PRICES environment variable ("parse=1.5,extract=4.5", USD per 1,000 pages); tools without a
+price are shown in credits. Call save_migration_report next.`,
   {
     findings: z.array(findingSchema).describe("One finding per call site, including calls that stay on the LLM."),
     project_name: z.string().optional().describe("Name of the project (used in the heading)."),
     files_scanned: z.number().int().nonnegative().optional().describe("Number of files scanned."),
     architecture_overview: architectureOverviewSchema.optional(),
-    ndi_usd_per_credit: z.number().positive().optional().describe("USD per NDI credit. Overrides NACE_NDI_USD_PER_CREDIT."),
+    ndi_prices: z
+      .object({
+        parse: z.number().positive().optional(),
+        split: z.number().positive().optional(),
+        classify: z.number().positive().optional(),
+        extract: z.number().positive().optional(),
+        ground: z.number().positive().optional(),
+      })
+      .optional()
+      .describe("USD per 1,000 pages (per 1,000 targets for ground) for each NDI tool, as the console's Models & pricing page lists them. Overrides NACE_NDI_PRICES tool by tool."),
   },
-  async ({ findings, project_name, files_scanned, architecture_overview, ndi_usd_per_credit }) => ({
+  async ({ findings, project_name, files_scanned, architecture_overview, ndi_prices }) => ({
     content: [
       {
         type: "text" as const,
@@ -114,7 +124,7 @@ variable; otherwise NDI is shown in credits. Call save_migration_report next.`,
           projectName: project_name,
           filesScanned: files_scanned ?? 0,
           architecture: architecture_overview,
-          ndiUsdPerCredit: resolveNdiPrice(ndi_usd_per_credit),
+          ndiPrices: resolveNdiPrices(ndi_prices),
         }),
       },
     ],

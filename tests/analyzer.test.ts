@@ -3,11 +3,11 @@ import { generateMigrationPlanMarkdown } from "../src/tools/analyzer.js";
 import { INVOICE, REPLY, SENTIMENT, TICKET } from "./fixtures/findings.js";
 
 const NOW = new Date("2026-10-15T12:00:00.000Z");
-const report = (ndiUsdPerCredit: number | null = null) =>
+const report = (ndiPrices: Partial<Record<"parse" | "split" | "classify" | "extract" | "ground", number>> = {}) =>
   generateMigrationPlanMarkdown([TICKET, SENTIMENT, INVOICE, REPLY], {
     projectName: "demo",
     filesScanned: 12,
-    ndiUsdPerCredit,
+    ndiPrices,
     now: NOW,
   });
 
@@ -22,7 +22,7 @@ describe("generateMigrationPlanMarkdown", () => {
     expect(md).toContain("| Sites that can move to NDI | 1 |");
     expect(md).toContain("| Calls that stay on the LLM | 1 |");
     expect(md).toContain("| Estimated cost of 1,000 runs of each estimated site, today | $15.25 |");
-    expect(md).toContain("| Same, with nace | $0.09 + 6,000 NDI credits |");
+    expect(md).toContain("| Same, with nace | $0.09 + 6,000 extract credits |");
     expect(md).toContain("| Sites without a full estimate | 1 |");
   });
 
@@ -55,13 +55,13 @@ describe("generateMigrationPlanMarkdown", () => {
     expect(md).toContain("### NDI extract: fields from a file, with citations");
     expect(md.match(/\*\*Invoice fields\*\*/g)).toHaveLength(1);
     expect(md).toContain("  - Also: drex_noul (medium): The same prompt also flags printed PII.");
-    expect(md).toContain("  - Cost per call: $0.0115 today → $0.000072 + 6 NDI credits with nace; per 1,000 calls $11.50 → $0.072 + 6,000 NDI credits");
+    expect(md).toContain("  - Cost per call: $0.0115 today → $0.000072 + 6 extract credits with nace; per 1,000 calls $11.50 → $0.072 + 6,000 extract credits");
   });
 
-  it("prices NDI when a price per credit is given", () => {
-    const md = report(0.01);
+  it("prices NDI from per-tool prices", () => {
+    const md = report({ extract: 30 });
     expect(md).toContain("  - Cost per call: $0.0115 today → $0.0601 with nace; per 1,000 calls $11.50 → $60.07");
-    expect(md).toContain("Priced at $0.01 per credit.");
+    expect(md).toContain("Priced per 1,000 pages: extract $30.00.");
   });
 
   it("lists calls that stay on the LLM and split-up calls", () => {
@@ -77,6 +77,13 @@ describe("generateMigrationPlanMarkdown", () => {
     expect(md).toContain("https://console.nace.ai");
     expect(md).toContain("Authorization: Bearer $NACE_API_KEY");
     expect(md.toLowerCase()).not.toContain("scaledown");
+  });
+
+  it("says not estimated when no site has a full estimate", () => {
+    const md = generateMigrationPlanMarkdown([SENTIMENT, REPLY], { projectName: "demo", now: NOW });
+    expect(md).toContain("| Estimated cost of 1,000 runs of each estimated site, today | not estimated |");
+    expect(md).toContain("| Same, with nace | not estimated |");
+    expect(md).toContain("| Sites without a full estimate | 1 |");
   });
 
   it("handles an empty scan", () => {

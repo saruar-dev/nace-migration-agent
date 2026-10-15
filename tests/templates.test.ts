@@ -21,6 +21,14 @@ describe("scenarios", () => {
   it.each(SCENARIOS.map((s) => [s.type, s] as const))("%s typescript program parses", (_t, s) => {
     expect(() => tsParses(programFor(s, "typescript"))).not.toThrow();
   });
+  it("upload every file under a unique path, so concurrent users never share one", () => {
+    for (const s of SCENARIOS.filter((x) => x.type.startsWith("ndi_"))) {
+      expect(s.after.python).not.toContain("new_version");
+      expect(s.after.typescript).not.toContain("new_version");
+      expect(s.after.python).toContain("uuid.uuid4()");
+      expect(s.after.typescript).toContain("randomUUID()");
+    }
+  });
   it("use nace-sdk", () => {
     for (const s of SCENARIOS) {
       expect(s.setup.python).toContain("from nace_sdk import");

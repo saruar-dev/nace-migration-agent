@@ -21107,14 +21107,6 @@ var StdioServerTransport = class {
 import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, join } from "path";
 
-// src/config.ts
-function resolveNdiPrice(arg, env = process.env.NACE_NDI_USD_PER_CREDIT) {
-  if (typeof arg === "number" && Number.isFinite(arg) && arg > 0) return arg;
-  if (env === void 0 || env.trim() === "") return null;
-  const n = Number(env);
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
 // src/tools/types.ts
 var NACE_TYPES = [
   "drex_choice",
@@ -21150,6 +21142,22 @@ var TYPE_ALIASES = {
   extract: "ndi_extract",
   ground: "ndi_ground"
 };
+
+// src/config.ts
+var positive = (n) => typeof n === "number" && Number.isFinite(n) && n > 0;
+function resolveNdiPrices(arg, env = process.env.NACE_NDI_PRICES) {
+  const prices = {};
+  for (const part of (env ?? "").split(",")) {
+    const [name, value] = part.split("=").map((x) => x.trim());
+    const n = value ? Number(value) : NaN;
+    if (NDI_TOOLS.includes(name) && positive(n)) prices[name] = n;
+  }
+  for (const tool of NDI_TOOLS) {
+    const n = arg?.[tool];
+    if (positive(n)) prices[tool] = n;
+  }
+  return prices;
+}
 
 // src/schema.ts
 var naceTypeSchema = external_exports.preprocess(
@@ -21368,8 +21376,8 @@ var NDI_CREDITS_PER_UNIT = {
 };
 function ndiCredits(step) {
   if (step.tool === "ground") return NDI_CREDITS_PER_UNIT.ground * (step.targets ?? 1);
-  const credits2 = NDI_CREDITS_PER_UNIT[step.tool] * step.pages;
-  return step.parse_mode === "high" ? credits2 * 2 : credits2;
+  const credits = NDI_CREDITS_PER_UNIT[step.tool] * step.pages;
+  return step.parse_mode === "high" ? credits * 2 : credits;
 }
 var perMillion = (tokens2, usdPerMillion) => tokens2 / 1e6 * usdPerMillion;
 function llmCost(model, input, output, notes) {
@@ -21381,7 +21389,7 @@ function llmCost(model, input, output, notes) {
   if (price.note) notes.push(`${model}: ${price.note}`);
   return perMillion(input, price.input) + perMillion(output, price.output);
 }
-function estimateCost(cost, ndiUsdPerCredit) {
+function estimateCost(cost, ndiPrices) {
   const notes = [];
   const b = cost.before;
   let before_usd;
@@ -21389,29 +21397,34 @@ function estimateCost(cost, ndiUsdPerCredit) {
     before_usd = llmCost(b.model, b.input_tokens, b.output_tokens, notes);
   } else if (b.kind === "local") {
     before_usd = 0;
+    if (cost.after.some((s) => s.handler === "ndi")) {
+      notes.push(
+        `${b.library} is free today, so NDI adds cost here; the case for moving is accuracy on scans and layouts, and citations, not price`
+      );
+    }
   } else {
     const price = lookupOcrPrice(b.service);
     before_usd = price ? price.per_page * b.pages : null;
     if (!price) notes.push(`${b.service}: no published per-page price, not estimated`);
   }
   let after_usd = 0;
-  let ndi_credits = 0;
+  const ndi_unpriced = {};
   for (const step of cost.after) {
     if (step.handler === "drex") {
       if (after_usd !== null) after_usd += perMillion(step.input_tokens, DREX_USD_PER_M_INPUT);
     } else if (step.handler === "ndi") {
-      ndi_credits += ndiCredits(step);
+      const credits = ndiCredits(step);
+      const per1000 = ndiPrices[step.tool];
+      if (per1000 === void 0) ndi_unpriced[step.tool] = (ndi_unpriced[step.tool] ?? 0) + credits;
+      else if (after_usd !== null) after_usd += credits * per1000 / (1e3 * NDI_CREDITS_PER_UNIT[step.tool]);
     } else {
       const c = llmCost(step.model, step.input_tokens, step.output_tokens, notes);
       after_usd = after_usd === null || c === null ? null : after_usd + c;
     }
   }
-  const hasNdi = cost.after.some((s) => s.handler === "ndi");
-  if (hasNdi && ndiUsdPerCredit !== null && after_usd !== null) after_usd += ndi_credits * ndiUsdPerCredit;
-  if (hasNdi && ndiUsdPerCredit === null) {
-    notes.push("NDI price per credit not set (NACE_NDI_USD_PER_CREDIT); NDI shown in credits only");
-  }
-  return { before_usd, after_usd, ndi_credits, ndi_priced: !hasNdi || ndiUsdPerCredit !== null, notes };
+  const unpricedTools = Object.keys(ndi_unpriced);
+  if (unpricedTools.length) notes.push(`NDI price not set for ${unpricedTools.join(", ")} (NACE_NDI_PRICES); shown in credits`);
+  return { before_usd, after_usd, ndi_unpriced, notes };
 }
 function formatUsd(n) {
   if (n === 0) return "$0";
@@ -21421,14 +21434,20 @@ function formatUsd(n) {
 }
 
 // src/tools/analyzer.ts
-var credits = (n) => `${n.toLocaleString("en-US")} NDI credits`;
+function creditsText(unpriced, times) {
+  return NDI_TOOLS.filter((t) => unpriced[t]).map((t) => {
+    const n = unpriced[t] * times;
+    return `${n.toLocaleString("en-US")} ${t} credit${n === 1 ? "" : "s"}`;
+  }).join(" + ");
+}
 var money = (usd) => usd === null ? "not estimated" : formatUsd(usd);
 var location = (f) => f.line_number ? `${f.file_path}:${f.line_number}` : f.file_path;
 function newPath(e, times) {
   if (e.after_usd === null) return "not estimated";
-  if (e.ndi_priced || e.ndi_credits === 0) return formatUsd(e.after_usd * times);
-  if (e.after_usd === 0) return credits(e.ndi_credits * times);
-  return `${formatUsd(e.after_usd * times)} + ${credits(e.ndi_credits * times)}`;
+  const credits = creditsText(e.ndi_unpriced, times);
+  if (!credits) return formatUsd(e.after_usd * times);
+  if (e.after_usd === 0) return credits;
+  return `${formatUsd(e.after_usd * times)} + ${credits}`;
 }
 function costLine(e) {
   if (!e) return "not estimated (no usage figures)";
@@ -21549,14 +21568,17 @@ No AI or document-processing calls were found.
 
 ${footer}`;
   }
-  const ndiPrice = opts.ndiUsdPerCredit ?? null;
-  const sites = findings.filter((f) => f.opportunities.length > 0).map((f) => ({ finding: f, primary: f.opportunities[0].type, estimate: f.cost ? estimateCost(f.cost, ndiPrice) : null }));
+  const ndiPrices = opts.ndiPrices ?? {};
+  const sites = findings.filter((f) => f.opportunities.length > 0).map((f) => ({ finding: f, primary: f.opportunities[0].type, estimate: f.cost ? estimateCost(f.cost, ndiPrices) : null }));
   const kept = findings.filter((f) => f.opportunities.length === 0);
   const count = (p2) => sites.filter((s) => productOf(s.primary) === p2).length;
   const full = sites.filter((s) => s.estimate && s.estimate.before_usd !== null && s.estimate.after_usd !== null);
   const totalBefore = full.reduce((n, s) => n + s.estimate.before_usd, 0);
-  const unpricedCredits = full.reduce((n, s) => n + (s.estimate.ndi_priced ? 0 : s.estimate.ndi_credits), 0);
-  const totalAfter = { after_usd: full.reduce((n, s) => n + s.estimate.after_usd, 0), ndi_credits: unpricedCredits, ndi_priced: unpricedCredits === 0 };
+  const unpriced = {};
+  for (const s of full) {
+    for (const t of NDI_TOOLS) if (s.estimate.ndi_unpriced[t]) unpriced[t] = (unpriced[t] ?? 0) + s.estimate.ndi_unpriced[t];
+  }
+  const totalAfter = { after_usd: full.reduce((n, s) => n + s.estimate.after_usd, 0), ndi_unpriced: unpriced };
   const missing = sites.length - full.length;
   const header = `# nace Migration Plan \u2014 ${project}
 
@@ -21573,12 +21595,13 @@ ${footer}`;
 | Sites that can move to Drex | ${count("drex")} |
 | Sites that can move to NDI | ${count("ndi")} |
 | Calls that stay on the LLM | ${kept.length} |
-| Estimated cost of 1,000 runs of each estimated site, today | ${formatUsd(totalBefore * 1e3)} |
-| Same, with nace | ${newPath(totalAfter, 1e3)} |
+| Estimated cost of 1,000 runs of each estimated site, today | ${full.length ? formatUsd(totalBefore * 1e3) : "not estimated"} |
+| Same, with nace | ${full.length ? newPath(totalAfter, 1e3) : "not estimated"} |
 ${missing > 0 ? `| Sites without a full estimate | ${missing} |
 ` : ""}`;
   const drexIntro = `Drex answers typed questions about text with calibrated probabilities. \`${DREX_MODEL}\` costs $${DREX_USD_PER_M_INPUT} per million input tokens; output is free.`;
-  const ndiIntro = "NDI reads files and bills credits per page: parse 1, split 1, classify 2, extract 3, ground 5 per target." + (ndiPrice !== null ? ` Priced at ${formatUsd(ndiPrice)} per credit.` : " The price per credit is not set, so NDI costs are shown in credits; set NACE_NDI_USD_PER_CREDIT to see dollars.");
+  const priced = NDI_TOOLS.filter((t) => ndiPrices[t] !== void 0);
+  const ndiIntro = "NDI reads files and bills credits per page: parse 1, split 1, classify 2, extract 3, ground 5 per target. Each tool has its own price." + (priced.length ? ` Priced per 1,000 pages: ${priced.map((t) => `${t} ${formatUsd(ndiPrices[t])}`).join(", ")}.` : "") + (priced.length < NDI_TOOLS.length ? " Tools without a price are shown in credits; set NACE_NDI_PRICES (USD per 1,000 pages per tool, from the console's Models & pricing page) to see dollars." : "");
   const keptSection = kept.length ? `## Stays on the LLM
 
 ${kept.map((f) => `- **${f.process}** (\`${location(f)}\`): ${f.keep_reason}`).join("\n")}
@@ -21962,10 +21985,14 @@ function getDetectionPatterns(language) {
 // src/tools/snippets.ts
 var PY_CLIENT = "nace = NaceClient()  # reads NACE_API_KEY";
 var TS_CLIENT = "const nace = new NaceClient(); // reads NACE_API_KEY";
-var PY_FILE_SETUP = `from nace_sdk import NaceClient
+var PY_FILE_SETUP = `import os
+import uuid
+
+from nace_sdk import NaceClient
 
 ${PY_CLIENT}`;
-var TS_FILE_SETUP = `import { openAsBlob } from "node:fs";
+var TS_FILE_SETUP = `import { randomUUID } from "node:crypto";
+import { openAsBlob } from "node:fs";
 import { basename } from "node:path";
 import { NaceClient, workspaceFile } from "nace-sdk";
 
@@ -21974,10 +22001,10 @@ var PY_TICKET = 'ticket_text = "I was charged twice for my March invoice."';
 var TS_TICKET = 'const ticketText = "I was charged twice for my March invoice.";';
 var PY_PDF = 'pdf_path = "tests/fixtures/sample-invoice.pdf"';
 var TS_PDF = 'const pdfPath = "tests/fixtures/sample-invoice.pdf";';
-var PY_UPLOAD = 'uploaded = nace.documents.upload(pdf_path, on_conflict="new_version")';
+var PY_UPLOAD = 'uploaded = nace.documents.upload(pdf_path, path=f"uploads/{uuid.uuid4()}-{os.path.basename(pdf_path)}")';
 var TS_UPLOAD = `const uploaded = await nace.documents.upload(await openAsBlob(pdfPath), {
   file_name: basename(pdfPath),
-  on_conflict: "new_version",
+  path: "uploads/" + randomUUID() + "-" + basename(pdfPath),
 });`;
 var PY_WAIT = `if job.status != "succeeded":
     job = nace.jobs.wait(job.job_id)  # raises if the job failed`;
@@ -21994,6 +22021,7 @@ var fileTask = (instruction, json2, readPy, readTs, zodSchema, readObject) => ({
 });
 var FILE_NOTES = [
   "For a public https URL, pass the URL string as the source and skip the upload.",
+  "Each upload gets its own workspace path (a UUID prefix), so two users' files with the same name never become versions of one file.",
   "If you hold the bytes (for example multer's file.buffer), upload new Blob([buffer]) in TypeScript or the bytes in Python, with a file_name that keeps the extension.",
   "PDF, images (png, jpg, tiff, webp), Word, Excel, PowerPoint, HTML, email and plain text are accepted.",
   "Reuse one parse in later tools with a parse_result source so the file is not parsed and billed twice."
@@ -22671,16 +22699,23 @@ server.tool(
   `Builds the nace-report.md markdown from the findings: summary with estimated cost before and
 after, architecture overview, Drex sites, NDI sites, calls that stay on the LLM, split-up calls,
 API reference and setup. Cost arithmetic happens here, from each finding's cost block and the
-built-in price list. NDI dollars need ndi_usd_per_credit or the NACE_NDI_USD_PER_CREDIT environment
-variable; otherwise NDI is shown in credits. Call save_migration_report next.`,
+built-in price list. Each NDI tool has its own price: NDI dollars need ndi_prices or the
+NACE_NDI_PRICES environment variable ("parse=1.5,extract=4.5", USD per 1,000 pages); tools without a
+price are shown in credits. Call save_migration_report next.`,
   {
     findings: external_exports.array(findingSchema).describe("One finding per call site, including calls that stay on the LLM."),
     project_name: external_exports.string().optional().describe("Name of the project (used in the heading)."),
     files_scanned: external_exports.number().int().nonnegative().optional().describe("Number of files scanned."),
     architecture_overview: architectureOverviewSchema.optional(),
-    ndi_usd_per_credit: external_exports.number().positive().optional().describe("USD per NDI credit. Overrides NACE_NDI_USD_PER_CREDIT.")
+    ndi_prices: external_exports.object({
+      parse: external_exports.number().positive().optional(),
+      split: external_exports.number().positive().optional(),
+      classify: external_exports.number().positive().optional(),
+      extract: external_exports.number().positive().optional(),
+      ground: external_exports.number().positive().optional()
+    }).optional().describe("USD per 1,000 pages (per 1,000 targets for ground) for each NDI tool, as the console's Models & pricing page lists them. Overrides NACE_NDI_PRICES tool by tool.")
   },
-  async ({ findings, project_name, files_scanned, architecture_overview, ndi_usd_per_credit }) => ({
+  async ({ findings, project_name, files_scanned, architecture_overview, ndi_prices }) => ({
     content: [
       {
         type: "text",
@@ -22688,7 +22723,7 @@ variable; otherwise NDI is shown in credits. Call save_migration_report next.`,
           projectName: project_name,
           filesScanned: files_scanned ?? 0,
           architecture: architecture_overview,
-          ndiUsdPerCredit: resolveNdiPrice(ndi_usd_per_credit)
+          ndiPrices: resolveNdiPrices(ndi_prices)
         })
       }
     ]

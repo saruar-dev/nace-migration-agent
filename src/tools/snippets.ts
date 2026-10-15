@@ -35,8 +35,9 @@ export interface Scenario {
 const PY_CLIENT = "nace = NaceClient()  # reads NACE_API_KEY";
 const TS_CLIENT = "const nace = new NaceClient(); // reads NACE_API_KEY";
 
-const PY_FILE_SETUP = `from nace_sdk import NaceClient\n\n${PY_CLIENT}`;
-const TS_FILE_SETUP = `import { openAsBlob } from "node:fs";
+const PY_FILE_SETUP = `import os\nimport uuid\n\nfrom nace_sdk import NaceClient\n\n${PY_CLIENT}`;
+const TS_FILE_SETUP = `import { randomUUID } from "node:crypto";
+import { openAsBlob } from "node:fs";
 import { basename } from "node:path";
 import { NaceClient, workspaceFile } from "nace-sdk";
 
@@ -47,10 +48,11 @@ const TS_TICKET = 'const ticketText = "I was charged twice for my March invoice.
 const PY_PDF = 'pdf_path = "tests/fixtures/sample-invoice.pdf"';
 const TS_PDF = 'const pdfPath = "tests/fixtures/sample-invoice.pdf";';
 
-const PY_UPLOAD = 'uploaded = nace.documents.upload(pdf_path, on_conflict="new_version")';
+// A unique workspace path per upload, so concurrent requests never share or overwrite a file.
+const PY_UPLOAD = 'uploaded = nace.documents.upload(pdf_path, path=f"uploads/{uuid.uuid4()}-{os.path.basename(pdf_path)}")';
 const TS_UPLOAD = `const uploaded = await nace.documents.upload(await openAsBlob(pdfPath), {
   file_name: basename(pdfPath),
-  on_conflict: "new_version",
+  path: "uploads/" + randomUUID() + "-" + basename(pdfPath),
 });`;
 const PY_WAIT = `if job.status != "succeeded":
     job = nace.jobs.wait(job.job_id)  # raises if the job failed`;
@@ -69,6 +71,7 @@ const fileTask = (instruction: string, json: boolean, readPy: string, readTs: st
 
 const FILE_NOTES = [
   "For a public https URL, pass the URL string as the source and skip the upload.",
+  "Each upload gets its own workspace path (a UUID prefix), so two users' files with the same name never become versions of one file.",
   "If you hold the bytes (for example multer's file.buffer), upload new Blob([buffer]) in TypeScript or the bytes in Python, with a file_name that keeps the extension.",
   "PDF, images (png, jpg, tiff, webp), Word, Excel, PowerPoint, HTML, email and plain text are accepted.",
   "Reuse one parse in later tools with a parse_result source so the file is not parsed and billed twice.",

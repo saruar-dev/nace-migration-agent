@@ -53,6 +53,9 @@ export type CostAfterStep =
   | { handler: "ndi"; tool: NdiTool; pages: number; targets?: number; parse_mode?: "low" | "medium" | "high" }
   | { handler: "llm"; model: string; input_tokens: number; output_tokens: number };
 
+/** USD per 1,000 pages (per 1,000 targets for ground), per NDI tool, as the console's Models & pricing page lists them. */
+export type NdiPrices = Partial<Record<NdiTool, number>>;
+
 export interface CostBlock {
   before: CostBefore;
   after: CostAfterStep[];

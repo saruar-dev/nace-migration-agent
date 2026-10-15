@@ -228,7 +228,8 @@ under it.
 1. Run `pwd` to get the absolute project root.
 2. Call `generate_migration_plan` with `findings`, `project_name` (the basename
    of the root), `files_scanned`, and `architecture_overview`. Pass
-   `ndi_usd_per_credit` only if the user gave you a price per credit.
+   `ndi_prices` only if the user gave you NDI prices (USD per 1,000 pages,
+   per tool).
 3. Immediately call `save_migration_report` with the exact markdown and the
    absolute root. Do this before printing anything.
 4. Tell the user: "Report saved to `nace-report.md`." Then summarize: files

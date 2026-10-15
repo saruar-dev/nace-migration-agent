@@ -1,13 +1,13 @@
 import type { ArchitectureOverview, Finding } from "../schema.js";
 import { DREX_MODEL, DREX_USD_PER_M_INPUT, PRICES_AS_OF, estimateCost, formatUsd, type CostEstimate } from "./pricing.js";
-import { NACE_TYPES, TYPE_LABELS, productOf, type NaceType, type Product } from "./types.js";
+import { NACE_TYPES, NDI_TOOLS, TYPE_LABELS, productOf, type NaceType, type NdiPrices, type NdiTool, type Product } from "./types.js";
 
 export interface ReportOptions {
   projectName?: string;
   filesScanned?: number;
   architecture?: ArchitectureOverview;
-  /** USD per NDI credit; null or undefined shows NDI in credits. */
-  ndiUsdPerCredit?: number | null;
+  /** NDI prices per tool (USD per 1,000 pages); tools without one are shown in credits. */
+  ndiPrices?: NdiPrices;
   /** Fixed time for reproducible output (tests). */
   now?: Date;
 }
@@ -18,15 +18,23 @@ interface Site {
   estimate: CostEstimate | null;
 }
 
-const credits = (n: number) => `${n.toLocaleString("en-US")} NDI credits`;
+function creditsText(unpriced: Partial<Record<NdiTool, number>>, times: number): string {
+  return NDI_TOOLS.filter((t) => unpriced[t])
+    .map((t) => {
+      const n = unpriced[t]! * times;
+      return `${n.toLocaleString("en-US")} ${t} credit${n === 1 ? "" : "s"}`;
+    })
+    .join(" + ");
+}
 const money = (usd: number | null) => (usd === null ? "not estimated" : formatUsd(usd));
 const location = (f: Finding) => (f.line_number ? `${f.file_path}:${f.line_number}` : f.file_path);
 
-function newPath(e: Pick<CostEstimate, "after_usd" | "ndi_credits" | "ndi_priced">, times: number): string {
+function newPath(e: Pick<CostEstimate, "after_usd" | "ndi_unpriced">, times: number): string {
   if (e.after_usd === null) return "not estimated";
-  if (e.ndi_priced || e.ndi_credits === 0) return formatUsd(e.after_usd * times);
-  if (e.after_usd === 0) return credits(e.ndi_credits * times);
-  return `${formatUsd(e.after_usd * times)} + ${credits(e.ndi_credits * times)}`;
+  const credits = creditsText(e.ndi_unpriced, times);
+  if (!credits) return formatUsd(e.after_usd * times);
+  if (e.after_usd === 0) return credits;
+  return `${formatUsd(e.after_usd * times)} + ${credits}`;
 }
 
 function costLine(e: CostEstimate | null): string {
@@ -130,17 +138,20 @@ export function generateMigrationPlanMarkdown(findings: Finding[], opts: ReportO
     return `# nace Migration Plan — ${project}\n\nNo AI or document-processing calls were found.\n\n${footer}`;
   }
 
-  const ndiPrice = opts.ndiUsdPerCredit ?? null;
+  const ndiPrices = opts.ndiPrices ?? {};
   const sites: Site[] = findings
     .filter((f) => f.opportunities.length > 0)
-    .map((f) => ({ finding: f, primary: f.opportunities[0].type, estimate: f.cost ? estimateCost(f.cost, ndiPrice) : null }));
+    .map((f) => ({ finding: f, primary: f.opportunities[0].type, estimate: f.cost ? estimateCost(f.cost, ndiPrices) : null }));
   const kept = findings.filter((f) => f.opportunities.length === 0);
   const count = (p: Product) => sites.filter((s) => productOf(s.primary) === p).length;
 
   const full = sites.filter((s) => s.estimate && s.estimate.before_usd !== null && s.estimate.after_usd !== null);
   const totalBefore = full.reduce((n, s) => n + s.estimate!.before_usd!, 0);
-  const unpricedCredits = full.reduce((n, s) => n + (s.estimate!.ndi_priced ? 0 : s.estimate!.ndi_credits), 0);
-  const totalAfter = { after_usd: full.reduce((n, s) => n + s.estimate!.after_usd!, 0), ndi_credits: unpricedCredits, ndi_priced: unpricedCredits === 0 };
+  const unpriced: Partial<Record<NdiTool, number>> = {};
+  for (const s of full) {
+    for (const t of NDI_TOOLS) if (s.estimate!.ndi_unpriced[t]) unpriced[t] = (unpriced[t] ?? 0) + s.estimate!.ndi_unpriced[t]!;
+  }
+  const totalAfter = { after_usd: full.reduce((n, s) => n + s.estimate!.after_usd!, 0), ndi_unpriced: unpriced };
   const missing = sites.length - full.length;
 
   const header = `# nace Migration Plan — ${project}
@@ -159,16 +170,18 @@ export function generateMigrationPlanMarkdown(findings: Finding[], opts: ReportO
 | Sites that can move to Drex | ${count("drex")} |
 | Sites that can move to NDI | ${count("ndi")} |
 | Calls that stay on the LLM | ${kept.length} |
-| Estimated cost of 1,000 runs of each estimated site, today | ${formatUsd(totalBefore * 1000)} |
-| Same, with nace | ${newPath(totalAfter, 1000)} |
+| Estimated cost of 1,000 runs of each estimated site, today | ${full.length ? formatUsd(totalBefore * 1000) : "not estimated"} |
+| Same, with nace | ${full.length ? newPath(totalAfter, 1000) : "not estimated"} |
 ${missing > 0 ? `| Sites without a full estimate | ${missing} |\n` : ""}`;
 
   const drexIntro = `Drex answers typed questions about text with calibrated probabilities. \`${DREX_MODEL}\` costs $${DREX_USD_PER_M_INPUT} per million input tokens; output is free.`;
+  const priced = NDI_TOOLS.filter((t) => ndiPrices[t] !== undefined);
   const ndiIntro =
-    "NDI reads files and bills credits per page: parse 1, split 1, classify 2, extract 3, ground 5 per target." +
-    (ndiPrice !== null
-      ? ` Priced at ${formatUsd(ndiPrice)} per credit.`
-      : " The price per credit is not set, so NDI costs are shown in credits; set NACE_NDI_USD_PER_CREDIT to see dollars.");
+    "NDI reads files and bills credits per page: parse 1, split 1, classify 2, extract 3, ground 5 per target. Each tool has its own price." +
+    (priced.length ? ` Priced per 1,000 pages: ${priced.map((t) => `${t} ${formatUsd(ndiPrices[t]!)}`).join(", ")}.` : "") +
+    (priced.length < NDI_TOOLS.length
+      ? " Tools without a price are shown in credits; set NACE_NDI_PRICES (USD per 1,000 pages per tool, from the console's Models & pricing page) to see dollars."
+      : "");
 
   const keptSection = kept.length
     ? `## Stays on the LLM\n\n${kept.map((f) => `- **${f.process}** (\`${location(f)}\`): ${f.keep_reason}`).join("\n")}\n`

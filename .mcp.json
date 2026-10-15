@@ -3,7 +3,7 @@
     "nace-migration-agent": {
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"],
-      "env": { "NACE_NDI_USD_PER_CREDIT": "${NACE_NDI_USD_PER_CREDIT:-}" }
+      "env": { "NACE_NDI_PRICES": "${NACE_NDI_PRICES:-}" }
     }
   }
 }

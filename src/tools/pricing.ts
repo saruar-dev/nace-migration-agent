@@ -1,4 +1,4 @@
-import type { CostAfterStep, CostBlock, NdiTool } from "./types.js";
+import type { CostAfterStep, CostBlock, NdiPrices, NdiTool } from "./types.js";
 
 export const PRICES_AS_OF = "2026-10-15";
 
@@ -176,12 +176,10 @@ export function ndiCredits(step: Extract<CostAfterStep, { handler: "ndi" }>): nu
 export interface CostEstimate {
   /** USD per call today; null when it could not be estimated. */
   before_usd: number | null;
-  /** USD per call on the new path, excluding NDI when no price per credit is set; null when an LLM step could not be priced. */
+  /** USD per call on the new path, excluding NDI tools without a price; null when an LLM step could not be priced. */
   after_usd: number | null;
-  /** NDI credits per call. */
-  ndi_credits: number;
-  /** False when the new path has NDI steps and no price per credit was given. */
-  ndi_priced: boolean;
+  /** NDI credits per call for tools without a price, by tool. */
+  ndi_unpriced: Partial<Record<NdiTool, number>>;
   notes: string[];
 }
 
@@ -197,7 +195,7 @@ function llmCost(model: string, input: number, output: number, notes: string[]):
   return perMillion(input, price.input) + perMillion(output, price.output);
 }
 
-export function estimateCost(cost: CostBlock, ndiUsdPerCredit: number | null): CostEstimate {
+export function estimateCost(cost: CostBlock, ndiPrices: NdiPrices): CostEstimate {
   const notes: string[] = [];
   const b = cost.before;
   let before_usd: number | null;
@@ -205,6 +203,11 @@ export function estimateCost(cost: CostBlock, ndiUsdPerCredit: number | null): C
     before_usd = llmCost(b.model, b.input_tokens, b.output_tokens, notes);
   } else if (b.kind === "local") {
     before_usd = 0;
+    if (cost.after.some((s) => s.handler === "ndi")) {
+      notes.push(
+        `${b.library} is free today, so NDI adds cost here; the case for moving is accuracy on scans and layouts, and citations, not price`,
+      );
+    }
   } else {
     const price = lookupOcrPrice(b.service);
     before_usd = price ? price.per_page * b.pages : null;
@@ -212,24 +215,24 @@ export function estimateCost(cost: CostBlock, ndiUsdPerCredit: number | null): C
   }
 
   let after_usd: number | null = 0;
-  let ndi_credits = 0;
+  const ndi_unpriced: Partial<Record<NdiTool, number>> = {};
   for (const step of cost.after) {
     if (step.handler === "drex") {
       if (after_usd !== null) after_usd += perMillion(step.input_tokens, DREX_USD_PER_M_INPUT);
     } else if (step.handler === "ndi") {
-      ndi_credits += ndiCredits(step);
+      const credits = ndiCredits(step);
+      const per1000 = ndiPrices[step.tool];
+      if (per1000 === undefined) ndi_unpriced[step.tool] = (ndi_unpriced[step.tool] ?? 0) + credits;
+      else if (after_usd !== null) after_usd += (credits * per1000) / (1000 * NDI_CREDITS_PER_UNIT[step.tool]);
     } else {
       const c = llmCost(step.model, step.input_tokens, step.output_tokens, notes);
       after_usd = after_usd === null || c === null ? null : after_usd + c;
     }
   }
 
-  const hasNdi = cost.after.some((s) => s.handler === "ndi");
-  if (hasNdi && ndiUsdPerCredit !== null && after_usd !== null) after_usd += ndi_credits * ndiUsdPerCredit;
-  if (hasNdi && ndiUsdPerCredit === null) {
-    notes.push("NDI price per credit not set (NACE_NDI_USD_PER_CREDIT); NDI shown in credits only");
-  }
-  return { before_usd, after_usd, ndi_credits, ndi_priced: !hasNdi || ndiUsdPerCredit !== null, notes };
+  const unpricedTools = Object.keys(ndi_unpriced);
+  if (unpricedTools.length) notes.push(`NDI price not set for ${unpricedTools.join(", ")} (NACE_NDI_PRICES); shown in credits`);
+  return { before_usd, after_usd, ndi_unpriced, notes };
 }
 
 export function formatUsd(n: number): string {

@@ -50,10 +50,12 @@ Then, in any project:
 
 Costs are estimates from token and page counts and a dated price list
 (`src/tools/pricing.ts`). A model that is not on the list is reported as "not
-estimated". NDI is shown in credits unless you set a price per credit:
+estimated". Each NDI tool has its own price; tools without one are shown in
+credits. To see dollars, set the per-tool prices the console's Models & pricing
+page lists, in USD per 1,000 pages (per 1,000 targets for ground):
 
 ```bash
-export NACE_NDI_USD_PER_CREDIT=0.01   # your price, from the console's Models & pricing page
+export NACE_NDI_PRICES="parse=…,split=…,classify=…,extract=…,ground=…"
 ```
 
 ## MCP tools

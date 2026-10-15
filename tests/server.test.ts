@@ -16,7 +16,7 @@ describe.each(ENTRIES)("MCP server (%s)", (_name, args) => {
 
   beforeAll(async () => {
     client = new Client({ name: "test", version: "0.0.0" });
-    const env = { ...(process.env as Record<string, string>), NACE_NDI_USD_PER_CREDIT: "" };
+    const env = { ...(process.env as Record<string, string>), NACE_NDI_PRICES: "" };
     await client.connect(new StdioClientTransport({ command: process.execPath, args, env }));
   });
   afterAll(async () => {

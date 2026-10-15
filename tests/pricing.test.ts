@@ -53,33 +53,64 @@ describe("estimateCost", () => {
   it("compares an LLM call with Drex", () => {
     const e = estimateCost(
       { before: { kind: "llm", model: "gpt-4o", input_tokens: 1000, output_tokens: 200 }, after: [{ handler: "drex", input_tokens: 600 }], assumptions: [] },
-      null,
+      {},
     );
     expect(e.before_usd).toBeCloseTo(0.0045, 10);
     expect(e.after_usd).toBeCloseTo(0.000036, 10);
-    expect(e.ndi_priced).toBe(true);
+    expect(e.ndi_unpriced).toEqual({});
   });
-  it("keeps NDI in credits when no price per credit is given", () => {
+  it("keeps NDI in credits, per tool, when the tool has no price", () => {
     const e = estimateCost(
       { before: { kind: "local", library: "pdf-parse" }, after: [{ handler: "ndi", tool: "parse", pages: 2 }], assumptions: [] },
-      null,
+      {},
     );
-    expect(e).toMatchObject({ before_usd: 0, after_usd: 0, ndi_credits: 2, ndi_priced: false });
-    expect(e.notes.join(" ")).toContain("NACE_NDI_USD_PER_CREDIT");
+    expect(e).toMatchObject({ before_usd: 0, after_usd: 0, ndi_unpriced: { parse: 2 } });
+    expect(e.notes.join(" ")).toContain("NACE_NDI_PRICES");
   });
-  it("prices NDI when a price per credit is given", () => {
+  it("explains why a free local library becomes a cost", () => {
+    const e = estimateCost(
+      { before: { kind: "local", library: "pdf-parse" }, after: [{ handler: "ndi", tool: "parse", pages: 1 }], assumptions: [] },
+      {},
+    );
+    expect(e.notes[0]).toBe(
+      "pdf-parse is free today, so NDI adds cost here; the case for moving is accuracy on scans and layouts, and citations, not price",
+    );
+  });
+  it("prices NDI from the tool's price per 1,000 pages", () => {
     const e = estimateCost(
       { before: { kind: "ocr_service", service: "textract:analyze_expense", pages: 2 }, after: [{ handler: "ndi", tool: "extract", pages: 2 }], assumptions: [] },
-      0.01,
+      { extract: 30 },
     );
     expect(e.before_usd).toBeCloseTo(0.02, 10);
     expect(e.after_usd).toBeCloseTo(0.06, 10);
-    expect(e.ndi_priced).toBe(true);
+    expect(e.ndi_unpriced).toEqual({});
+  });
+  it("doubles the price in high parse mode and prices ground per target", () => {
+    const e = estimateCost(
+      {
+        before: { kind: "local", library: "pypdf" },
+        after: [
+          { handler: "ndi", tool: "extract", pages: 2, parse_mode: "high" },
+          { handler: "ndi", tool: "ground", pages: 9, targets: 3 },
+        ],
+        assumptions: [],
+      },
+      { extract: 30, ground: 10 },
+    );
+    expect(e.after_usd).toBeCloseTo(0.12 + 0.03, 10);
+  });
+  it("prices the tools it has a price for and keeps the rest in credits", () => {
+    const e = estimateCost(
+      { before: { kind: "local", library: "pypdf" }, after: [{ handler: "ndi", tool: "parse", pages: 2 }, { handler: "ndi", tool: "extract", pages: 2 }], assumptions: [] },
+      { parse: 2 },
+    );
+    expect(e.after_usd).toBeCloseTo(0.004, 10);
+    expect(e.ndi_unpriced).toEqual({ extract: 6 });
   });
   it("marks unknown models and services as not estimated", () => {
     const e = estimateCost(
       { before: { kind: "ocr_service", service: "azure:prebuilt-invoice", pages: 1 }, after: [{ handler: "llm", model: "settings.openai_model", input_tokens: 10, output_tokens: 10 }], assumptions: [] },
-      null,
+      {},
     );
     expect(e.before_usd).toBeNull();
     expect(e.after_usd).toBeNull();

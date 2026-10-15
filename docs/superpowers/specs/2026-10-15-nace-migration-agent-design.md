@@ -47,7 +47,7 @@ Out of scope:
 
 | File | Purpose | Change |
 |---|---|---|
-| `src/index.ts` | MCP server, four tools | Rename server; keep tool names; extend the finding schema with `cost` (below); read `NACE_NDI_USD_PER_CREDIT`. |
+| `src/index.ts` | MCP server, four tools | Rename server; keep tool names; extend the finding schema with `cost` (below); read `NACE_NDI_PRICES`. |
 | `src/tools/patterns.ts` | Search patterns | Keep LLM providers; add raw-HTTP LLM calls and document-pipeline providers (below). |
 | `src/tools/templates.ts` | Before/after snippets | Replace with eight nace types (below). |
 | `src/tools/pricing.ts` | New. Price table and cost arithmetic | Pure functions, no I/O. |
@@ -158,14 +158,14 @@ cost?: {
 - LLM prices per million input and output tokens for the common OpenAI, Anthropic and Google models, copied from each provider's pricing page with an "as of" date. Model ids are matched exactly, then by known alias (for example a dated snapshot to its base id).
 - Per-page prices for Textract, Azure Document Intelligence and Google Document AI, from their pricing pages, with the same date.
 - Drex: `drex-v2.0` at $0.06 per million input tokens (from `https://console.nace.ai/models`), output free.
-- NDI credits per tool: parse 1 per page, split 1 per page, classify 2 per page, extract 3 per page, ground 5 per target per file; `parse_mode: "high"` doubles parse, split, classify and extract. Dollars per credit come from the `NACE_NDI_USD_PER_CREDIT` environment variable of the MCP server process. The public docs do not list it; the value is in the logged-in console under Models & pricing.
+- NDI credits per tool: parse 1 per page, split 1 per page, classify 2 per page, extract 3 per page, ground 5 per target per file; `parse_mode: "high"` doubles parse, split, classify and extract. Each tool has its own price. Dollars come from per-tool prices in USD per 1,000 pages (per 1,000 targets for ground), as the logged-in console's Models & pricing page lists them: the `ndi_prices` tool argument or the `NACE_NDI_PRICES` environment variable (`parse=1.5,extract=4.5`). The public docs do not list them. (Amended 2026-10-15 after the final review: the first version assumed one price per credit for every tool.)
 
 Rules:
 
 - Cost per call = sum over `after` steps, compared with `before`. The report shows per call and per 1,000 calls, and the summary shows the total if every site ran 1,000 times.
 - A model or service not in the table gives "not estimated" for that side, never a guess.
 - A `local` before (pdf-parse, pypdf, tesseract) costs $0. NDI then costs more than today, and the report says so: the case for those sites is accuracy and citations, not price.
-- Without `NACE_NDI_USD_PER_CREDIT`, NDI steps show credits only, and the totals that include them say so.
+- A tool without a price shows credits, per tool, and the totals that include it say so.
 - Every figure is labeled as an estimate and lists the finding's `assumptions`.
 
 ## Report: `nace-report.md`
