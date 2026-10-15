@@ -1,410 +1,191 @@
-import type { OpportunityType } from "./templates.js";
+import type { ArchitectureOverview, Finding } from "../schema.js";
+import { DREX_MODEL, DREX_USD_PER_M_INPUT, PRICES_AS_OF, estimateCost, formatUsd, type CostEstimate } from "./pricing.js";
+import { NACE_TYPES, TYPE_LABELS, productOf, type NaceType, type Product } from "./types.js";
 
-// ── Shared types (filled in by Claude, not by heuristics) ────────────────────
-
-export interface Opportunity {
-  type: OpportunityType;
-  confidence: "high" | "medium" | "low";
-  reason: string;
-  estimated_savings: string;
-}
-
-/**
- * Complexity score (1–5) assessed by Claude based on full cross-file context.
- * 1 = trivial single-purpose call; 5 = highly complex multi-step reasoning.
- */
-export interface ComplexityAnalysis {
-  /** Expected range 1–5 (1 = trivial, 5 = highly complex). */
-  score: number;
-  /** Expected: "trivial" | "simple" | "moderate" | "complex" | "highly_complex". */
-  label: string;
-  reasons: string[];
-  /**
-   * When score >= 3, Claude-suggested decomposition: break the call into
-   * simpler sub-calls where some can be handled by ScaleDown SLMs.
-   */
-  decomposition?: DecompositionStep[] | null;
-}
-
-export interface DecompositionStep {
-  step: number;
-  purpose: string;
-  /** "scaledown" = replace with an SLM; "llm" = still needs a frontier model */
-  handler: "scaledown" | "llm";
-  slm_type?: OpportunityType;
-  notes: string;
-}
-
-export interface Finding {
-  file_path: string;
-  line_number?: number | null;
-  provider: string;
-  opportunities: Opportunity[];
-  complexity: ComplexityAnalysis;
-  code_snippet: string;
-}
-
-// ── Standardised report schema (version "1") ─────────────────────────────────
-
-export interface ReportFinding {
-  file: string;
-  line: number | null;
-  provider: string;
-  complexity_score: number;
-  complexity_label: string;
-  opportunities: Array<{
-    type: OpportunityType;
-    confidence: "high" | "medium" | "low";
-    estimated_savings: string;
-    reason: string;
-  }>;
-  decomposition: DecompositionStep[] | null;
-  snippet_preview: string;
-}
-
-export interface ArchitectureOverview {
-  /** Plain-English summary of how and where AI is used in the system */
-  description: string;
-  /** Each distinct AI usage pattern found (e.g. "RAG pipeline", "ticket routing") */
-  patterns: Array<{
-    name: string;
-    files: string[];
-    provider: string;
-    purpose: string;
-  }>;
-}
-
-export interface MigrationReport {
-  version: "1";
-  generated_at: string;
-  project_name: string;
+export interface ReportOptions {
+  projectName?: string;
+  filesScanned?: number;
   architecture?: ArchitectureOverview;
-  summary: {
-    files_scanned: number;
-    files_with_ai_calls: number;
-    total_opportunities: number;
-    providers_detected: string[];
-    complexity_breakdown: Record<string, number>;
-  };
-  findings: ReportFinding[];
-  api: {
-    base_url: string;
-    auth: string;
-    docs_url: string;
-  };
+  /** USD per NDI credit; null or undefined shows NDI in credits. */
+  ndiUsdPerCredit?: number | null;
+  /** Fixed time for reproducible output (tests). */
+  now?: Date;
 }
 
-// ── Report builder ────────────────────────────────────────────────────────────
-
-export function buildReport(
-  findings: Finding[],
-  projectName: string = "your project",
-  filesScanned: number = 0,
-  architecture?: ArchitectureOverview
-): MigrationReport {
-  const complexityBreakdown: Record<string, number> = {};
-  for (const f of findings) {
-    const label = f.complexity?.label ?? "unknown";
-    complexityBreakdown[label] = (complexityBreakdown[label] ?? 0) + 1;
-  }
-
-  return {
-    version: "1",
-    generated_at: new Date().toISOString(),
-    project_name: projectName,
-    ...(architecture ? { architecture } : {}),
-    summary: {
-      files_scanned: filesScanned,
-      files_with_ai_calls: new Set(findings.map((f) => f.file_path)).size,
-      total_opportunities: findings.reduce(
-        (n, f) => n + f.opportunities.length,
-        0
-      ),
-      providers_detected: [
-        ...new Set(findings.map((f) => f.provider).filter(Boolean)),
-      ],
-      complexity_breakdown: complexityBreakdown,
-    },
-    findings: findings.map((f) => ({
-      file: f.file_path,
-      line: f.line_number ?? null,
-      provider: f.provider,
-      complexity_score: f.complexity?.score ?? 1,
-      complexity_label: f.complexity?.label ?? "trivial",
-      opportunities: f.opportunities.map((o) => ({
-        type: o.type,
-        confidence: o.confidence,
-        estimated_savings: o.estimated_savings,
-        reason: o.reason,
-      })),
-      decomposition: f.complexity?.decomposition ?? null,
-      snippet_preview: f.code_snippet.split("\n").slice(0, 3).join("\n"),
-    })),
-    api: {
-      base_url: "https://api.scaledown.xyz",
-      auth: "x-api-key: $SCALEDOWN_API_KEY",
-      docs_url: "https://docs.scaledown.ai/api-reference/",
-    },
-  };
+interface Site {
+  finding: Finding;
+  primary: NaceType;
+  estimate: CostEstimate | null;
 }
 
-// ── Migration plan markdown ───────────────────────────────────────────────────
+const credits = (n: number) => `${n.toLocaleString("en-US")} NDI credits`;
+const money = (usd: number | null) => (usd === null ? "not estimated" : formatUsd(usd));
+const location = (f: Finding) => (f.line_number ? `${f.file_path}:${f.line_number}` : f.file_path);
 
-const ORDER: OpportunityType[] = [
-  "classification",
-  "extraction",
-  "summarization",
-  "compression",
-];
-const TITLES: Record<OpportunityType, string> = {
-  classification: "Replace Classification Calls with `sd_classify`",
-  extraction: "Replace Extraction Calls with `sd_extract`",
-  summarization: "Replace Summarization Calls with `sd_summarize`",
-  compression: "Add Context Compression with `sd_compress`",
-};
-const SAVINGS: Record<OpportunityType, string> = {
-  classification: "~95% per call",
-  extraction: "~95% per call",
-  summarization: "~90% per call",
-  compression: "50–70% on context tokens",
-};
-const ACTIONS: Record<OpportunityType, string> = {
-  classification:
-    "Replace the frontier LLM call with a POST to `/classify`.",
-  extraction:
-    "Replace the frontier LLM call with a POST to `/v1/chat/completions` (`model: \"extract\"`).",
-  summarization:
-    "Replace the frontier LLM call with a POST to `/v1/chat/completions` (`model: \"summarize\"`).",
-  compression:
-    "Before the LLM call, POST the context to `/compress/raw/`, check `results.success`, and pass `results.compressed_prompt` (the compressed context) plus the original prompt to the LLM.",
-};
-
-function slmName(type: OpportunityType): string {
-  const map: Record<OpportunityType, string> = {
-    compression: "sd_compress → POST /compress/raw/",
-    classification: "sd_classify → POST /classify",
-    extraction: "sd_extract → POST /v1/chat/completions (model: extract)",
-    summarization: "sd_summarize → POST /v1/chat/completions (model: summarize)",
-  };
-  return map[type];
+function newPath(e: Pick<CostEstimate, "after_usd" | "ndi_credits" | "ndi_priced">, times: number): string {
+  if (e.after_usd === null) return "not estimated";
+  if (e.ndi_priced || e.ndi_credits === 0) return formatUsd(e.after_usd * times);
+  if (e.after_usd === 0) return credits(e.ndi_credits * times);
+  return `${formatUsd(e.after_usd * times)} + ${credits(e.ndi_credits * times)}`;
 }
 
-export function generateMigrationPlanMarkdown(
-  findings: Finding[],
-  projectName: string = "your project",
-  filesScanned: number = 0,
-  architecture?: ArchitectureOverview
-): string {
-  const report = buildReport(findings, projectName, filesScanned, architecture);
+function costLine(e: CostEstimate | null): string {
+  if (!e) return "not estimated (no usage figures)";
+  const per1k = e.before_usd === null ? null : e.before_usd * 1000;
+  return `${money(e.before_usd)} today → ${newPath(e, 1)} with nace; per 1,000 calls ${money(per1k)} → ${newPath(e, 1000)}`;
+}
 
-  if (findings.length === 0) {
-    return `# ScaleDown Migration Plan — ${projectName}\n\nNo AI API calls were found.\n\n---\n*Generated by ScaleDown Migration Agent at ${report.generated_at}*\n`;
-  }
+function siteLines(s: Site): string {
+  const f = s.finding;
+  const top = f.opportunities[0];
+  const lines = [
+    `- **${f.process}** (\`${location(f)}\`): ${top.confidence} confidence, ${f.complexity.label} (${f.complexity.score}/5). ${top.reason}`,
+    `  - Cost per call: ${costLine(s.estimate)}`,
+  ];
+  for (const o of f.opportunities.slice(1)) lines.push(`  - Also: ${o.type} (${o.confidence}): ${o.reason}`);
+  if (f.cost?.assumptions.length) lines.push(`  - Assumptions: ${f.cost.assumptions.join("; ")}`);
+  if (s.estimate?.notes.length) lines.push(`  - Notes: ${s.estimate.notes.join("; ")}`);
+  return lines.join("\n");
+}
 
-  // Group findings by opportunity type (deduplicated per finding)
-  const byType: Record<string, Finding[]> = {};
-  for (const f of findings) {
-    for (const o of f.opportunities) {
-      if (!byType[o.type]) byType[o.type] = [];
-      if (!byType[o.type].includes(f)) byType[o.type].push(f);
-    }
-  }
+function productSection(product: Product, sites: Site[], intro: string): string {
+  const mine = sites.filter((s) => productOf(s.primary) === product);
+  if (mine.length === 0) return "";
+  const groups = NACE_TYPES.filter((t) => productOf(t) === product)
+    .map((t) => {
+      const inType = mine.filter((s) => s.primary === t);
+      return inType.length ? `### ${TYPE_LABELS[t]}\n\n${inType.map(siteLines).join("\n")}\n` : "";
+    })
+    .filter(Boolean);
+  return `## ${product === "drex" ? "Drex" : "NDI"} sites\n\n${intro}\n\n${groups.join("\n")}`;
+}
 
-  const { summary } = report;
-  const complexRows = Object.entries(summary.complexity_breakdown)
-    .map(([label, count]) => `| ${label} | ${count} |`)
+function architectureSection(a?: ArchitectureOverview): string {
+  if (!a) return "";
+  const rows = a.patterns
+    .map((p) => `| ${p.name} | ${p.provider} | ${p.files.map((f) => `\`${f}\``).join(", ")} | ${p.purpose} |`)
     .join("\n");
+  return `## Current AI architecture\n\n${a.description}\n\n| Usage pattern | Provider | Files | Purpose |\n|---|---|---|---|\n${rows}\n`;
+}
 
-  // Architecture overview section
-  let architectureSection = "";
-  if (architecture) {
-    const patternRows = architecture.patterns
-      .map(
-        (p) =>
-          `| ${p.name} | ${p.provider} | ${p.files.map((f) => `\`${f}\``).join(", ")} | ${p.purpose} |`
-      )
-      .join("\n");
-    architectureSection = `## Current AI Architecture
+function handlerCell(d: NonNullable<Finding["complexity"]["decomposition"]>[number]): string {
+  if (d.handler === "drex") return `Drex \`${d.nace_type}\``;
+  if (d.handler === "ndi") return `NDI \`${d.nace_type}\``;
+  return "LLM";
+}
 
-${architecture.description}
+function decompositionSection(findings: Finding[]): string {
+  const complex = findings.filter((f) => f.complexity.score >= 3 && f.complexity.decomposition?.length);
+  if (complex.length === 0) return "";
+  const parts = complex.map((f) => {
+    const rows = f.complexity.decomposition!.map((d) => `| ${d.step} | ${d.purpose} | ${handlerCell(d)} | ${d.notes} |`).join("\n");
+    return `### ${f.process} (\`${location(f)}\`)\n\n${f.complexity.label} (${f.complexity.score}/5): ${f.complexity.reasons.join("; ")}\n\n| Step | Purpose | Handler | Notes |\n|---|---|---|---|\n${rows}\n`;
+  });
+  return `## Split-up calls\n\nThese calls do several jobs in one prompt. Each step goes to the cheapest handler that can do it; the LLM keeps only generation.\n\n${parts.join("\n")}`;
+}
 
-| Usage Pattern | Provider | Files | Purpose |
-|---|---|---|---|
-${patternRows}
+const API_REFERENCE = `## nace API reference
 
+**Base URL:** \`https://console.nace.ai\`
+**Auth:** \`Authorization: Bearer $NACE_API_KEY\` (one \`nace_sk_\` key covers Drex and NDI)
+**Docs:** https://drex.nace.ai/docs
+
+### Drex: \`POST /v1/systemone\`
+
+\`\`\`json
+{
+  "model": "${DREX_MODEL}",
+  "state": "<text or any JSON>",
+  "questions": {
+    "category": { "type": "choice", "instructions": "Which team should handle this?", "criteria": { "billing": "Payments and invoices", "technical": "Bugs and errors" } },
+    "is_spam": { "type": "noul", "instructions": "Is this unsolicited advertising?" },
+    "urgency": { "type": "score", "instructions": "How urgent is it?", "criteria": ["low", "medium", "high"] }
+  }
+}
+\`\`\`
+
+\`answers.<id>\` holds \`choice\` with \`probabilities\`, \`noul\` (the probability of yes), or \`score\` with \`probabilities\`. Billing is on \`usage.input_tokens\`.
+
+### NDI: \`POST /v1/documents/{parse|split|classify|extract|ground}\`
+
+Each call creates a job for one file. \`source\` is an https URL, a file uploaded to your workspace, or an earlier parse. Pass \`wait_seconds\` (up to 60) or poll \`GET /v1/documents/jobs/{id}\`. The SDKs handle uploads and waiting; see the templates.
 `;
+
+const SETUP = `## Setup
+
+\`\`\`bash
+pip install nace-sdk        # Python 3.11+
+npm install nace-sdk        # Node
+export NACE_API_KEY="nace_sk_..."
+\`\`\`
+
+Create a key at https://drex.nace.ai. One key covers Drex and NDI.
+`;
+
+export function generateMigrationPlanMarkdown(findings: Finding[], opts: ReportOptions = {}): string {
+  const project = opts.projectName ?? "your project";
+  const generated = (opts.now ?? new Date()).toISOString();
+  const footer = `---\n*Generated by nace-migration-agent at ${generated} · report v1*\n`;
+  if (findings.length === 0) {
+    return `# nace Migration Plan — ${project}\n\nNo AI or document-processing calls were found.\n\n${footer}`;
   }
 
-  let md = `# ScaleDown Migration Plan — ${projectName}
+  const ndiPrice = opts.ndiUsdPerCredit ?? null;
+  const sites: Site[] = findings
+    .filter((f) => f.opportunities.length > 0)
+    .map((f) => ({ finding: f, primary: f.opportunities[0].type, estimate: f.cost ? estimateCost(f.cost, ndiPrice) : null }));
+  const kept = findings.filter((f) => f.opportunities.length === 0);
+  const count = (p: Product) => sites.filter((s) => productOf(s.primary) === p).length;
 
-> Generated: ${report.generated_at}
-> Report version: ${report.version}
+  const full = sites.filter((s) => s.estimate && s.estimate.before_usd !== null && s.estimate.after_usd !== null);
+  const totalBefore = full.reduce((n, s) => n + s.estimate!.before_usd!, 0);
+  const unpricedCredits = full.reduce((n, s) => n + (s.estimate!.ndi_priced ? 0 : s.estimate!.ndi_credits), 0);
+  const totalAfter = { after_usd: full.reduce((n, s) => n + s.estimate!.after_usd!, 0), ndi_credits: unpricedCredits, ndi_priced: unpricedCredits === 0 };
+  const missing = sites.length - full.length;
 
-${architectureSection}## Summary
+  const header = `# nace Migration Plan — ${project}
+
+> Generated: ${generated}
+> Report version: 1
+> Cost figures are estimates from token and page counts, not measurements. Prices as of ${PRICES_AS_OF}.
+`;
+
+  const summary = `## Summary
 
 | Metric | Value |
 |---|---|
-| Files scanned | ${summary.files_scanned} |
-| Files with AI API calls | ${summary.files_with_ai_calls} |
-| Total integration opportunities | ${summary.total_opportunities} |
-| Providers detected | ${summary.providers_detected.join(", ")} |
+| Files scanned | ${opts.filesScanned ?? 0} |
+| Files with AI or document calls | ${new Set(findings.map((f) => f.file_path)).size} |
+| Sites that can move to Drex | ${count("drex")} |
+| Sites that can move to NDI | ${count("ndi")} |
+| Calls that stay on the LLM | ${kept.length} |
+| Estimated cost of 1,000 runs of each estimated site, today | ${formatUsd(totalBefore * 1000)} |
+| Same, with nace | ${newPath(totalAfter, 1000)} |
+${missing > 0 ? `| Sites without a full estimate | ${missing} |\n` : ""}`;
 
-### Call Complexity Breakdown
+  const drexIntro = `Drex answers typed questions about text with calibrated probabilities. \`${DREX_MODEL}\` costs $${DREX_USD_PER_M_INPUT} per million input tokens; output is free.`;
+  const ndiIntro =
+    "NDI reads files and bills credits per page: parse 1, split 1, classify 2, extract 3, ground 5 per target." +
+    (ndiPrice !== null
+      ? ` Priced at ${formatUsd(ndiPrice)} per credit.`
+      : " The price per credit is not set, so NDI costs are shown in credits; set NACE_NDI_USD_PER_CREDIT to see dollars.");
 
-| Complexity | Count |
-|---|---|
-${complexRows}
+  const keptSection = kept.length
+    ? `## Stays on the LLM\n\n${kept.map((f) => `- **${f.process}** (\`${location(f)}\`): ${f.keep_reason}`).join("\n")}\n`
+    : "";
 
-`;
-
-  let sectionNum = 1;
-  for (const type of ORDER) {
-    if (!byType[type]) continue;
-    md += `## ${sectionNum++}. ${TITLES[type]}
-
-**Estimated savings: ${SAVINGS[type]}**
-
-| File | Line | Complexity | Confidence |
-|---|---|---|---|
-${byType[type]
-  .map((f) => {
-    const opp = f.opportunities.find((o) => o.type === type)!;
-    return `| \`${f.file_path}\` | ${f.line_number ?? "?"} | ${f.complexity?.label ?? "?"} (${f.complexity?.score ?? "?"}/5) | ${opp.confidence} |`;
-  })
-  .join("\n")}
-
-**Action:** ${ACTIONS[type]}
-
-`;
-  }
-
-  // Complex call decompositions
-  const complexFindings = findings.filter(
-    (f) => (f.complexity?.score ?? 0) >= 3 && f.complexity?.decomposition?.length
-  );
-  if (complexFindings.length > 0) {
-    md += `## ${sectionNum++}. Complex Call Decompositions
-
-The following calls handle multiple tasks in a single LLM prompt.
-Breaking them into focused sub-calls reduces cost and improves reliability.
-
-`;
-    for (const f of complexFindings) {
-      md += `### \`${f.file_path}\`${f.line_number ? ` (line ${f.line_number})` : ""}
-
-**Complexity:** ${f.complexity.label} (${f.complexity.score}/5)
-**Reasons:** ${f.complexity.reasons.join("; ")}
-
-| Step | Purpose | Handler | Notes |
-|---|---|---|---|
-${f.complexity
-  .decomposition!.map(
-    (d) =>
-      `| ${d.step} | ${d.purpose} | ${
-        d.handler === "scaledown"
-          ? `ScaleDown \`${slmName(d.slm_type!)}\``
-          : "Frontier LLM"
-      } | ${d.notes} |`
-  )
-  .join("\n")}
-
-`;
-    }
-  }
-
-  md += `## ScaleDown HTTP API
-
-All ScaleDown SLMs are called via REST. No SDK required.
-
-**Base URL:** \`https://api.scaledown.xyz\`
-**Auth:** \`x-api-key: $SCALEDOWN_API_KEY\` (\`/v1/chat/completions\` also accepts \`Authorization: Bearer $SCALEDOWN_API_KEY\`)
-**Docs:** https://docs.scaledown.ai/api-reference/
-
-### sd_classify
-
-\`\`\`http
-POST /classify
-Content-Type: application/json
-x-api-key: $SCALEDOWN_API_KEY
-
-{
-  "text": "<input text>",
-  "labels": [
-    { "name": "billing",   "rubric": "Does this describe a billing issue?" },
-    { "name": "technical", "rubric": "Does this describe a technical issue?" }
-  ],
-  "reasoning": false
-}
-\`\`\`
-
-\`reasoning\` defaults to \`true\`, which adds a written explanation and roughly doubles the billed input tokens. Send \`false\` unless you read the \`reasoning\` field.
-
-Response: \`{ "top_label": "billing", "scores": { "billing": 0.99, "technical": 0.01 }, "labels": [...], "results": [...], "chunk_count": 1, "input_tokens": 250, "reasoning": "", "ocr_text": null }\` — read \`top_label\` (and \`scores\` for the full distribution).
-
-### sd_extract
-
-\`\`\`http
-POST /v1/chat/completions
-Content-Type: application/json
-x-api-key: $SCALEDOWN_API_KEY
-
-{
-  "model": "extract",
-  "messages": [
-    { "role": "system", "content": "<optional global instruction>" },
-    { "role": "user",   "content": "<input text>" }
-  ],
-  "entities": {
-    "Name":  "Full name of a person",
-    "Email": "Email address"
-  }
-}
-\`\`\`
-
-Response: a standard \`chat.completion\`. The result is a JSON **string** in \`choices[0].message.content\`; parse it to get \`{ "entities": [{ "text": "Alice", "type": "Name", "confidence": 0.98, "start": 0, "end": 5, "context": "..." }], "structured_result": null, "input_tokens": 229, "ocr_text": null }\`. Group \`entities[]\` by \`type\` to get per-field values (up to 30 distinct values per type). \`structured_result\` is \`null\` for flat fields like these; it is only filled for nested object or array schemas.
-
-### sd_compress
-
-\`\`\`http
-POST /compress/raw/
-Content-Type: application/json
-x-api-key: $SCALEDOWN_API_KEY
-
-{
-  "context": "<retrieved documents or long background text>",
-  "prompt":  "<user query or instruction>",
-  "scaledown": { "rate": "auto" }
-}
-\`\`\`
-
-Response: \`{ "results": { "success": true, "compressed_prompt": "...", "original_prompt": "...", "original_prompt_tokens": 4200, "compressed_prompt_tokens": 1400, "compression_ratio": 0.33 }, "successful": true, "total_original_tokens": 4200, "total_compressed_tokens": 1400, "num_successful": 1, "latency_ms": 52, "model_used": "gpt-4o" }\`
-
-The compression result is nested under \`results\` (a single object). Check \`results.success\`, then send \`results.compressed_prompt\` (the compressed **context**; the prompt is not folded in) together with your original prompt to the LLM.
-
-### sd_summarize
-
-\`\`\`http
-POST /v1/chat/completions
-Content-Type: application/json
-x-api-key: $SCALEDOWN_API_KEY
-
-{
-  "model": "summarize",
-  "messages": [
-    { "role": "system", "content": "Be concise." },
-    { "role": "user",   "content": "<document to summarize>" }
-  ],
-  "max_tokens": 1000
-}
-\`\`\`
-
-Response: a standard \`chat.completion\`. Parse \`choices[0].message.content\` (a JSON string) to get \`{ "summary": "...", "input_chars": 4200, "output_chars": 380, "latency_ms": 120, "input_tokens": 1050, "finish_reason": "stop", "notice": null, "ocr_text": null }\` and read \`summary\`. \`max_tokens\` is capped at 1000; \`finish_reason: "length"\` means the summary was cut off.
-
-Get a free API key (50M tokens free) at: https://scaledown.ai/dashboard
-
----
-*Generated by ScaleDown Migration Agent at ${report.generated_at} · Report schema v${report.version}*
-`;
-
-  return md;
+  return [
+    header,
+    summary,
+    architectureSection(opts.architecture),
+    productSection("drex", sites, drexIntro),
+    productSection("ndi", sites, ndiIntro),
+    keptSection,
+    decompositionSection(findings),
+    API_REFERENCE,
+    SETUP,
+    footer,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
