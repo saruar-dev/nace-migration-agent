@@ -13,6 +13,12 @@ allowed-tools:
   - Edit
   - Glob
   - Grep
+  # Tool names when installed as the Claude Code plugin
+  - mcp__plugin_slm-agent_scaledown-migration-agent__get_ai_detection_patterns
+  - mcp__plugin_slm-agent_scaledown-migration-agent__get_integration_template
+  - mcp__plugin_slm-agent_scaledown-migration-agent__generate_migration_plan
+  - mcp__plugin_slm-agent_scaledown-migration-agent__save_migration_report
+  # Tool names when the MCP server is added by hand as "scaledown-migration-agent"
   - mcp__scaledown-migration-agent__get_ai_detection_patterns
   - mcp__scaledown-migration-agent__get_integration_template
   - mcp__scaledown-migration-agent__generate_migration_plan
@@ -24,8 +30,8 @@ their AI API costs by finding every place in their codebase that could benefit
 from ScaleDown's task-specific SLMs:
 
 - **sd_classify** — replaces LLM classification calls (~95% cheaper), via `POST /classify`
-- **sd_extract** — replaces LLM entity/structured extraction calls (~95% cheaper), via `POST /extract`
-- **sd_summarize** — replaces LLM summarization calls (~90% cheaper), via `POST /summarization/abstractive`
+- **sd_extract** — replaces LLM entity/structured extraction calls (~95% cheaper), via `POST /v1/chat/completions` with `model: "extract"`
+- **sd_summarize** — replaces LLM summarization calls (~90% cheaper), via `POST /v1/chat/completions` with `model: "summarize"`
 - **sd_compress** — reduces context tokens 50–70% before any LLM call, via `POST /compress/raw/`
 
 Work through the following phases in order. Do not skip ahead.
@@ -37,13 +43,23 @@ Work through the following phases in order. Do not skip ahead.
 1. Call `get_ai_detection_patterns` with no arguments to get detection patterns
    for all languages and providers.
 
-2. Use Glob to list candidate files. Exclude `node_modules`, `.venv`, `venv`,
-   `__pycache__`, `dist`, `build`, `.git`. Focus on:
-   - Python: `**/*.py`
-   - TypeScript/JavaScript: `**/*.ts`, `**/*.tsx`, `**/*.js`, `**/*.mjs`
+2. Use Glob to list candidate files: every extension in the tool result's
+   `usage_guide.file_extensions` (don't use a shorter list of your own; it
+   includes `.mts`, `.cts`, `.jsx`, `.cjs` and others). Exclude every directory
+   in `usage_guide.exclude_dirs`.
 
-3. For each `grep_patterns` entry returned, run Grep across the candidate files.
-   Collect every match as `{ file_path, line_number, matched_line }`.
+3. For each provider entry, Grep its patterns over the candidate files with its
+   `extensions`, following `usage_guide.rules`:
+   - A file uses the provider if one of its `import_patterns` matches, or one of
+     its `strong_call_patterns` matches.
+   - In those files, `call_patterns` give the call lines. Collect each as
+     `{ file_path, line_number, matched_line }`.
+   - Ignore `call_patterns` matches in files that don't use the provider. Names
+     like `messages.create` (Twilio), `QueryEngine` or `generateText` are often
+     the project's own code or another library.
+   - If the tool result has a flat `grep_patterns` list instead (older server),
+     grep those, then read each matched file and drop the ones that don't
+     import an AI SDK.
 
 4. Deduplicate by file — merge matches from multiple patterns into one entry
    per file. Track the detected provider for each file.
@@ -82,6 +98,10 @@ If the prompt or messages are assembled outside this snippet:
 - Read 5–10 lines at each call site to understand the caller's intent
 - A single generic function (e.g. `call_llm`) may serve callers with very
   different purposes — treat each distinct usage as a separate finding
+- If the client is passed in (a `client` parameter, dependency injection, a
+  shared module), follow it back to where it is constructed to confirm the
+  provider. Files that only receive a client have no SDK import, so Phase 1
+  can only find them through distinctive calls like `chat.completions.create`.
 
 ### 2d. Record your findings
 After tracing, write down for each call:
@@ -169,7 +189,8 @@ Score each call based on what it is doing:
 
 For score ≥ 3 with multiple task types, produce a `decomposition` array:
 break the single LLM call into ordered steps, marking each as `scaledown`
-(with the relevant `slm_type`: `extract`, `classify`, or `summarize`) or
+(with the relevant `slm_type`: `extraction`, `classification`,
+`summarization`, or `compression` — required for `scaledown` steps) or
 `llm` (frontier model still required). Assign as many steps as possible to
 ScaleDown — only open-ended generation or multi-hop reasoning should remain
 as `llm`. Only add a `sd_compress` step if the call is a needle-in-haystack
@@ -193,11 +214,19 @@ Construct one `Finding` object per call site:
   "complexity": {
     "score": 2,
     "label": "simple",
-    "reasons": ["Single classification task with a fixed label set."],
-    "decomposition": null
+    "reasons": ["Single classification task with a fixed label set."]
   },
   "code_snippet": "<the 5-10 most relevant lines>"
 }
+```
+
+Leave `decomposition` out for single-task calls. When you include it, it is
+an array of steps:
+```json
+"decomposition": [
+  { "step": 1, "purpose": "Pull customer name and order id", "handler": "scaledown", "slm_type": "extraction", "notes": "sd_extract with Name / OrderId entities" },
+  { "step": 2, "purpose": "Draft the reply", "handler": "llm", "notes": "Open-ended generation stays on the frontier model" }
+]
 ```
 
 ---
@@ -205,7 +234,10 @@ Construct one `Finding` object per call site:
 ## Phase 4 — Plan generation
 
 1. Run `pwd` with Bash to get the absolute path of the current working directory.
-   Store this as `project_root` — you will need it in step 3.
+   Store this as `project_root` — you will need it in step 3. It must be
+   absolute; relative paths are rejected. On Windows, a native path
+   (`C:\Users\...`) is preferred, but a Git Bash path (`/c/Users/...`) is
+   also accepted.
 
 2. Call `generate_migration_plan` with:
    - `findings`: the complete array from Phase 3
@@ -269,6 +301,15 @@ For each approved finding:
 3. Apply the change:
    - Replace the LLM call with an HTTP call to the appropriate ScaleDown
      endpoint (see the HTTP API section of the saved report for exact shapes)
+   - Read each response field exactly where the report's HTTP API section
+     says it is. In particular, for `sd_compress` the result is nested:
+     check `results.success`, then use `results.compressed_prompt` (the
+     compressed context) together with the original prompt. Never read
+     `compressed_prompt` from the top level, and don't treat the top-level
+     `successful` flag as the only check. For `sd_extract` and
+     `sd_summarize`, parse `choices[0].message.content` as JSON first.
+   - For `sd_classify`, send `"reasoning": false` unless the code uses the
+     returned explanation (it roughly doubles billed input tokens).
    - Adapt all variable names to match the **actual** code — never use
      placeholder names from the template literally
    - For decomposed calls: replace the single LLM call with the ordered
@@ -287,6 +328,5 @@ For each approved finding:
 - **Never edit files without explicit user approval.**
 - **Never skip Phase 2.** Passing a thin snippet to the plan generator produces
   wrong classifications. Always trace the full prompt and callers first.
-- If `sd_summarize` is suggested, note it is in private preview.
 - If you are unsure about a change, show the before/after diff and ask first.
 - The report is always saved (Phase 4) regardless of whether migration is approved.

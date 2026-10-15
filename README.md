@@ -51,7 +51,7 @@ Add to your project's `.cursor/mcp.json` (or `~/.cursor/mcp.json` for global):
 ```json
 {
   "mcpServers": {
-    "scaledown-slm-agent": {
+    "scaledown-migration-agent": {
       "command": "npx",
       "args": ["-y", "@scaledown/migration-agent"]
     }
@@ -59,7 +59,7 @@ Add to your project's `.cursor/mcp.json` (or `~/.cursor/mcp.json` for global):
 }
 ```
 
-Then ask Cursor: *"Use the scaledown-slm-agent tools to evaluate this codebase for ScaleDown integration opportunities."*
+Then ask Cursor: *"Use the scaledown-migration-agent tools to evaluate this codebase for ScaleDown integration opportunities."*
 
 #### Using `optimize` in Cursor (Agent Skills)
 
@@ -71,7 +71,7 @@ Cursor natively loads [Agent Skills](https://cursor.com/docs/skills) — the sam
 2. Restart Cursor (or reload the window) so it re-scans skill directories.
 3. In Cursor's Agent chat, ask it to *"optimize my ScaleDown prompt"* (or similar) — it discovers and runs the `optimize` skill, driving the same phased tuning loop (sample ingestion, error clustering, targeted iteration, final report) as `/slm-agent:optimize` does in Claude Code. It runs with whichever model you've selected in Cursor, not just Claude.
 
-The `evaluate` skill is exposed the same way, but its instructions call the `scaledown-slm-agent` MCP tools above for codebase scanning and report generation, so configure the MCP server too if you want to use `evaluate` in Cursor. `optimize` has no MCP dependency — it only needs shell/file access, which Cursor's agent already has.
+The `evaluate` skill is exposed the same way, but its instructions call the `scaledown-migration-agent` MCP tools above (keep that server name so the skill's tool names resolve) for codebase scanning and report generation, so configure the MCP server too if you want to use `evaluate` in Cursor. `optimize` has no MCP dependency — it only needs shell/file access, which Cursor's agent already has.
 
 ### VS Code (Copilot / any MCP-compatible extension)
 
@@ -80,7 +80,7 @@ Add to your workspace `.vscode/mcp.json`:
 ```json
 {
   "servers": {
-    "scaledown-slm-agent": {
+    "scaledown-migration-agent": {
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "@scaledown/migration-agent"]
@@ -110,7 +110,7 @@ The server exposes four tools that any MCP-compatible AI assistant can call:
 
 ## Migration report
 
-After evaluation, a file named **`scaledown-report.md`** is saved in your project root. It follows a fixed schema (version `"1"`) and contains:
+After evaluation, a file named **`scaledown-report.md`** is saved in your project root. It is a markdown document with a fixed section layout (report schema version `1`, shown in its header) and contains:
 
 | Section | Content |
 |---|---|
@@ -118,7 +118,7 @@ After evaluation, a file named **`scaledown-report.md`** is saved in your projec
 | **Complexity breakdown** | Count of calls at each complexity level (trivial → highly_complex) |
 | **Per-opportunity sections** | Files, line numbers, complexity score, confidence level, and action for each of `sd_classify` / `sd_extract` / `sd_summarize` / `sd_compress` |
 | **Complex call decompositions** | For calls scoring 3+/5, a step-by-step breakdown showing which sub-tasks can move to a ScaleDown SLM and which still need a frontier LLM |
-| **HTTP API reference** | Exact request/response shapes for all four ScaleDown endpoints (`/classify`, `/extract`, `/summarization/abstractive`, `/compress/raw/`) |
+| **HTTP API reference** | Exact request/response shapes for all four ScaleDown endpoints (`/classify`, `/compress/raw/`, and `/v1/chat/completions` for extract and summarize) |
 
 The report header looks like:
 
@@ -183,13 +183,17 @@ export SCALEDOWN_API_KEY=...
 
 | Provider | Language |
 |---|---|
-| OpenAI (v0 and v1) | Python, TypeScript/JS |
+| OpenAI (v0 and v1; Chat Completions and Responses APIs) | Python, TypeScript/JS |
 | Anthropic | Python, TypeScript/JS |
 | LangChain | Python, TypeScript/JS |
 | LlamaIndex | Python |
 | Cohere | Python |
-| Google Generative AI | Python |
+| Google Gen AI (`google-genai`) and legacy Generative AI (`google-generativeai`) | Python |
 | Vercel AI SDK | TypeScript/JS |
+
+Files scanned: `.py` for Python; `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs` for TypeScript/JS.
+
+A file counts as using a provider when it imports that provider's SDK, or makes a call distinctive enough to identify it on its own (e.g. `chat.completions.create` on a client passed in from elsewhere). Generic names such as `messages.create` or `generateText` only count in files that import the SDK, so Twilio calls or a project's own `generateText()` aren't reported.
 
 ## Example output
 
@@ -235,6 +239,11 @@ Sign up at [scaledown.ai/dashboard](https://scaledown.ai/dashboard) — **50 mil
 
 ## Extending to other IDEs
 
-- **Codex (OpenAI)**: Add to `mcp_servers` in your Codex config once MCP support is available
+- **Codex (OpenAI)**: Add to `~/.codex/config.toml`:
+  ```toml
+  [mcp_servers.scaledown-migration-agent]
+  command = "npx"
+  args = ["-y", "@scaledown/migration-agent"]
+  ```
 - **JetBrains**: Use any MCP proxy plugin and point it at `npx @scaledown/migration-agent`
 - **Neovim / Emacs**: Use any MCP client plugin with the same npx command
